@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+# Windows/.NET
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+# Local user images and indexes (never commit)
+catalog.db*
+thumbs/
+models/
+*.safetensors
+*.pt
+*.onnx
+.env
+# Artifacts
+artifacts/
+dist/

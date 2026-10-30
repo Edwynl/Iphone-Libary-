@@ -1,0 +1,175 @@
+<Window
+    x:Class="WindowsAIPhotos.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Windows AI Photos">
+  <Grid x:Name="Root" Loaded="Root_Loaded" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="232"/>
+      <ColumnDefinition Width="*"/>
+    </Grid.ColumnDefinitions>
+
+    <!-- Library navigation sidebar -->
+    <Border Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+      <Grid Padding="20,24,16,20" RowSpacing="16">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Spacing="6">
+          <TextBlock Text="PHOTOS" FontSize="11" FontWeight="SemiBold" Opacity="0.6"/>
+          <TextBlock Text="Windows AI Photos" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+          <TextBlock Text="Private, local-first photo library" FontSize="11" Opacity="0.65" TextWrapping="Wrap"/>
+        </StackPanel>
+        <Button Grid.Row="1" x:Name="LibraryButton" Click="LibraryButton_Click"
+                HorizontalAlignment="Stretch" HorizontalContentAlignment="Left" Padding="12,10">
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <SymbolIcon Symbol="Pictures"/>
+            <TextBlock Text="All Photos  ·  全部照片"/>
+          </StackPanel>
+        </Button>
+        <StackPanel Grid.Row="2" Spacing="10">
+          <TextBlock Text="SOURCE FOLDERS / 来源目录" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
+          <Button x:Name="AddFolderButton" Click="AddFolderButton_Click"
+                  HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <SymbolIcon Symbol="Add"/>
+              <TextBlock Text="Add photo folder"/>
+            </StackPanel>
+          </Button>
+        </StackPanel>
+        <Grid Grid.Row="3" RowSpacing="8">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <ListView x:Name="FolderList" IsItemClickEnabled="False"
+                    SelectionMode="Single" HorizontalContentAlignment="Stretch" FontSize="12"/>
+          <Button x:Name="RemoveFolderButton" Grid.Row="1" Click="RemoveFolderButton_Click"
+                  HorizontalAlignment="Stretch" Content="Remove selected folder"/>
+        </Grid>
+        <StackPanel Grid.Row="4" Spacing="8">
+          <Border Padding="12" CornerRadius="10" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                  BorderThickness="1">
+            <StackPanel Spacing="5">
+              <TextBlock Text="ON-DEVICE AI" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
+              <TextBlock x:Name="AiState" Text="Checking..." TextWrapping="Wrap" FontSize="12"/>
+              <Button x:Name="AiButton" Click="AiButton_Click" HorizontalAlignment="Stretch">
+                <TextBlock Text="Install AI (~1.5 GB)"/>
+              </Button>
+            </StackPanel>
+          </Border>
+          <TextBlock Text="LIBRARY TOOLS" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
+          <Button x:Name="OrganizeButton" Click="OrganizeButton_Click"
+                  HorizontalAlignment="Stretch" Content="Organize / 整理照片"/>
+          <Button x:Name="DuplicatesButton" Click="DuplicatesButton_Click"
+                  HorizontalAlignment="Stretch" Content="Find duplicates / 查找重复"/>
+          <Button x:Name="MobileButton" Click="MobileButton_Click"
+                  HorizontalAlignment="Stretch" Content="iPhone sync / 手机同步"/>
+          <Button x:Name="BackupButton" Click="BackupButton_Click"
+                  HorizontalAlignment="Stretch" Content="Back up to drive / 本地备份"/>
+          <Button x:Name="CloudButton" Click="CloudButton_Click"
+                  HorizontalAlignment="Stretch" Content="Cloud backup / 云端备份"/>
+          <TextBlock Text="Mobile sync and backups are opt-in. No Ollama."
+                     TextWrapping="Wrap" FontSize="11" Opacity="0.65"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Main photo view -->
+    <Grid Grid.Column="1" Padding="24,22,24,12" RowSpacing="14">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <Grid ColumnSpacing="12">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Spacing="5">
+          <TextBlock x:Name="PageTitle" Text="All Photos" FontSize="26" FontWeight="SemiBold"/>
+          <TextBlock Text="Search by what is in a picture, not just its filename."
+                     FontSize="12" Opacity="0.7"/>
+        </StackPanel>
+        <Button Grid.Column="1" x:Name="ScanButton" Click="ScanButton_Click" Padding="18,10">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <SymbolIcon Symbol="Refresh"/>
+            <TextBlock Text="Scan / 扫描"/>
+          </StackPanel>
+        </Button>
+      </Grid>
+
+      <Grid Grid.Row="1" ColumnSpacing="10">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="SearchBox" PlaceholderText="搜索照片内容，例如：红色裙子、雪山、chiller plant..."
+                 Height="44" FontSize="14" KeyDown="SearchBox_KeyDown"/>
+        <Button x:Name="SearchButton" Grid.Column="1" Width="108" Height="44"
+                Click="SearchButton_Click" Style="{StaticResource AccentButtonStyle}">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <SymbolIcon Symbol="Find"/>
+            <TextBlock Text="Search"/>
+          </StackPanel>
+        </Button>
+      </Grid>
+
+      <StackPanel Grid.Row="2" Spacing="8">
+        <Grid ColumnSpacing="8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="StatusText" Text="Starting local engine..." TextWrapping="Wrap"
+                     Opacity="0.75" FontSize="12"/>
+          <TextBlock x:Name="PhotoCount" Grid.Column="1" Text="0 photos" FontSize="12" Opacity="0.7"/>
+        </Grid>
+        <ProgressBar x:Name="WorkProgress" IsIndeterminate="True" Visibility="Collapsed" Height="3"/>
+      </StackPanel>
+
+      <Grid Grid.Row="3">
+        <GridView x:Name="PhotoGrid" IsItemClickEnabled="True" ItemClick="PhotoGrid_ItemClick"
+                  SelectionMode="None" Padding="0" Margin="-10,0,-8,0"
+                  ScrollViewer.HorizontalScrollMode="Disabled"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <GridView.ItemTemplate>
+            <DataTemplate>
+              <StackPanel Width="185" Spacing="6" Padding="5">
+                <Border Width="175" Height="142" CornerRadius="8"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                  <Image Source="{Binding Thumbnail}" Width="175" Height="142"
+                         Stretch="UniformToFill"/>
+                </Border>
+                <TextBlock Text="{Binding FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Text="{Binding Subtitle}" FontSize="11" Opacity="0.6"/>
+              </StackPanel>
+            </DataTemplate>
+          </GridView.ItemTemplate>
+        </GridView>
+        <TextBlock x:Name="EmptyState" Text="Choose Add photo folder to begin."
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Opacity="0.65" Visibility="Collapsed"/>
+      </Grid>
+
+      <Grid Grid.Row="4" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock Text="Original photos remain untouched · Click an image to open it"
+                   VerticalAlignment="Center" FontSize="11" Opacity="0.6"/>
+        <Button x:Name="LoadMoreButton" Grid.Column="1" Content="Load more" Click="LoadMoreButton_Click"
+                Visibility="Collapsed"/>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>

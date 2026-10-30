@@ -1,0 +1,3 @@
+# Required for scanning, thumbnails, vector indexing and filename search.
+Pillow>=11.1,<13
+numpy>=1.26,<3
