@@ -33,7 +33,7 @@ enum KeychainStore {
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             var insert = query
-            attributes.forEach { insert[$0] = $1 }
+            attributes.forEach { insert[$0.key] = $0.value }
             status = SecItemAdd(insert as CFDictionary, nil)
         }
         guard status == errSecSuccess else {

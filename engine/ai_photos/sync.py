@@ -190,6 +190,11 @@ class SyncManager:
                 raise SyncFailure(423, "Sync is paused by Windows owner")
             row = db.execute("""SELECT * FROM sync_transfers WHERE device_id=? AND asset_id=?
                 AND resource_type=? AND sha256=?""", (device_id, asset_id, resource_type, digest)).fetchone()
+            if row and row["status"] == "complete":
+                saved = Path(row["stored_path"] or "")
+                if not saved.is_file():
+                    db.execute("UPDATE sync_transfers SET status='failed' WHERE id=?", (row["id"],))
+                    row = db.execute("SELECT * FROM sync_transfers WHERE id=?", (row["id"],)).fetchone()
             if row and row["status"] == "pending":
                 stage = self.staging / (row["id"] + ".part")
                 # Lost or truncated staging data cannot be resumed safely.

@@ -83,9 +83,12 @@ final class SyncState: ObservableObject {
                               userInfo: [NSLocalizedDescriptionKey: "Local checkpoint database is unavailable"])
             }
             let client = try SyncAPI(serverURL: serverURL, wifiOnly: wifiOnly)
-            if wifiOnly && !(await WiFiAvailability.isConnected()) {
-                throw NSError(domain: "PhotosCompanion", code: 2,
-                              userInfo: [NSLocalizedDescriptionKey: "Connect to Wi-Fi or disable Wi-Fi-only sync"])
+            if wifiOnly {
+                let wifiAvailable = await WiFiAvailability.isConnected()
+                if !wifiAvailable {
+                    throw NSError(domain: "PhotosCompanion", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey: "Connect to Wi-Fi or disable Wi-Fi-only sync"])
+                }
             }
             let permission = await PhotoSource.requestReadAccess()
             guard permission == .authorized || permission == .limited else {

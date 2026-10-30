@@ -248,3 +248,16 @@ def test_missing_partial_file_is_not_resumed_with_zero_filled_data(native):
     new = req(native, 'POST', '/api/sync/v1/transfers', data, token=token)[1]
     assert new['offset'] == 0 and new['transfer_id'] != tid
     assert not list(native.inbox.rglob('*.heic'))
+
+
+def test_missing_completed_file_does_not_claim_safe_backup(native):
+    token = pair(native)
+    photo = b'once-backed-up'
+    tid, payload = begin(native, token, photo)
+    assert put(native, token, tid, photo, 0)[0] == 200
+    assert req(native, 'POST', f'/api/sync/v1/transfers/{tid}/complete', token=token)[0] == 200
+    original = next(native.inbox.rglob('*.heic'))
+    original.unlink()  # Simulate external manual deletion from Windows storage.
+    status, retry = req(native, 'POST', '/api/sync/v1/transfers', payload, token=token)
+    assert status == 200 and retry['status'] == 'pending'
+    assert retry['offset'] == 0 and retry['transfer_id'] != tid
