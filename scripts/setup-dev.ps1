@@ -10,7 +10,7 @@ if (-not (Test-Path '.venv\Scripts\python.exe')) {
 }
 $python = Join-Path $root '.venv\Scripts\python.exe'
 & $python -m pip install --upgrade pip
-& $python -m pip install -r 'engine\requirements-test.txt'
+& $python -m pip install --require-hashes -r 'engine\requirements-test.lock.txt'
 if ($LASTEXITCODE -ne 0) { throw 'Installing core dependencies failed' }
 Write-Host 'Core engine installed and ready. AI weights have NOT been downloaded.'
 Write-Host 'To enable AI, run: .\.venv\Scripts\python.exe -m pip install -r engine\requirements-ai.txt'

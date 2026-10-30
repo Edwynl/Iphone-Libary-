@@ -39,3 +39,16 @@
   duplicate paths, large images, Chinese filenames, Unicode and EXIF rotation.
 - Controlled index throughput on 1k / 10k / 50k samples with observed metrics.
 - Signed installer installation, uninstall, upgrade and clean VM acceptance.
+
+## Review remediation validation (2026-10-30)
+
+- Local x64 .NET 10 Restore/Release Build and shipped worker/static-web smoke pass.
+- Source safety and resource manifest/restore regressions run on Windows; see
+  `docs/review/FIX_VALIDATION.md` for exact results and limitations.
+- Dependency metadata inventory: `docs/DEPENDENCIES.md`; hashed Python locks target
+  Python 3.11. AI model revision and artifact hashes are checked on explicit install.
+- New simulator CI configuration is present, but no GitHub Actions were triggered.
+- Still required: actual Xcode/API/type validation and physical iPhone matrix;
+  real model inference and 50k–100k media workload; physical cross-volume/power-loss
+  tests; real S3 provider recovery and immutable backup policy; exact license text
+  redistribution/SBOM review; signed installers, upgrades and TestFlight acceptance.

@@ -1,0 +1,7 @@
+{
+  "response": "RemoteDisconnected; no JSON error body",
+  "elapsed_sec": 16.66,
+  "db_offset": 0,
+  "stage_bytes": 28,
+  "reproduced": true
+}

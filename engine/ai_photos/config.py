@@ -6,6 +6,7 @@ from pathlib import Path
 
 APP_NAME = "WindowsAIPhotos"
 MODEL_ID = "google/siglip2-base-patch16-224"
+MODEL_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
 SUPPORTED_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".heic", ".heif"
 })

@@ -8,7 +8,7 @@ import sys
 from .catalog import PhotoCatalog
 from .semantic import Siglip2Encoder
 from .duplicates import find_duplicates
-from .backup import backup_local, backup_s3
+from .backup import backup_local, backup_s3, restore_local
 from .mobile import MobileServer
 from .organize import virtual_albums
 
@@ -35,6 +35,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("backup-local", help="Copy originals to independent storage (dry-run by default)")
     p.add_argument("target")
     p.add_argument("--apply", action="store_true", help="Explicitly perform copy")
+    p = sub.add_parser('restore-local', help='Verify a manifest and restore into an empty independent folder')
+    p.add_argument('backup')
+    p.add_argument('target')
+    p.add_argument('--apply', action='store_true')
     p = sub.add_parser("backup-s3", help="Opt-in S3 compatible cloud backup (dry-run by default)")
     p.add_argument("--bucket", required=True)
     p.add_argument("--endpoint-url")
@@ -70,6 +74,8 @@ def main(argv=None) -> int:
             data = find_duplicates(cat, similar_distance=args.distance)
         elif args.cmd == "backup-local":
             data = backup_local(cat, args.target, apply=args.apply)
+        elif args.cmd == 'restore-local':
+            data = restore_local(args.backup, args.target, apply=args.apply)
         elif args.cmd == "backup-s3":
             data = backup_s3(cat, bucket=args.bucket, endpoint_url=args.endpoint_url,
                              prefix=args.prefix, apply=args.apply)
@@ -88,7 +94,7 @@ def main(argv=None) -> int:
         else:
             parser.error("Invalid command")
         print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        return 0
+        return 2 if data.get('complete') is False else 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

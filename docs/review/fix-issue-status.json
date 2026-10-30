@@ -1,0 +1,243 @@
+{
+  "baseline": "c6408c1d2220241e555aa450839b553998ea1bd2",
+  "locally_verified": 15,
+  "external_gates": 11,
+  "pytest_passed": 60,
+  "pytest_skipped": 1,
+  "issues": [
+    {
+      "id": "P0-01",
+      "title": "本地备份可经目标目录 junction 覆盖来源原片",
+      "status": "本地验证通过",
+      "change": "拒绝输出重解析路径；固定 Windows 祖先目录，叶目录使用不可删除租约，POSIX 使用目录 fd；输出原子发布。",
+      "evidence": "实际 junction 拒绝、原片 SHA/mtime 不变；目录替换被拒；FSCTL_SET_REPARSE_POINT 在空目录可成功，持租约时返回 ERROR_DIR_NOT_EMPTY。",
+      "file": "engine/ai_photos/file_safety.py",
+      "line": 101
+    },
+    {
+      "id": "P1-01",
+      "title": "WinUI C# 编译被错误 FontWeights 命名空间阻断",
+      "status": "本地验证通过",
+      "change": "FontWeights 改用 Microsoft.UI.Text。",
+      "evidence": "Release Build：0 warnings / 0 errors；原 WMC 连带错误消失。",
+      "file": "src/WindowsAIPhotos/SyncManagement.cs",
+      "line": 48
+    },
+    {
+      "id": "P1-02",
+      "title": "Windows 输出遗漏 iPhone 网页所需静态资源",
+      "status": "本地验证通过",
+      "change": "mobile_web 纳入实际编译输出。",
+      "evidence": "从 bin 输出启动 worker；ping/status 正常，首页/JS/CSS 均 HTTP 200。",
+      "file": "src/WindowsAIPhotos/WindowsAIPhotos.csproj",
+      "line": 20
+    },
+    {
+      "id": "P1-03",
+      "title": "iPhone 完成检查点不与接收端及实际备份状态核对",
+      "status": "实现已改，外部验收未完成",
+      "change": "检查点绑定接收端 ID、逻辑资源和版本，跳过前调用服务端完整性 verify；老 sent 不再被直接信任。",
+      "evidence": "接收端 ID 持久/新库不同的服务器测试通过；Swift 语法通过；Xcode/设备对账补传 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/SyncState.swift",
+      "line": 150
+    },
+    {
+      "id": "P1-04",
+      "title": "已完成传输会继续确认丢失或损坏的文件",
+      "status": "本地验证通过",
+      "change": "begin/complete/verify 核验实际文件大小与 SHA；损坏/丢失返回未完成。补传恢复到新文件，保留可疑旧文件。",
+      "evidence": "损坏、缺失、再次补传、旧文件保留均有回归测试。",
+      "file": "engine/ai_photos/sync.py",
+      "line": 82
+    },
+    {
+      "id": "P1-05",
+      "title": "PhotoKit alternatePhoto 被丢弃，可漏备 RAW/ProRAW",
+      "status": "实现已改，外部验收未完成",
+      "change": "PhotoKit 纳入 alternatePhoto，服务器协议接受该资源类型。",
+      "evidence": "DNG/alternatePhoto 服务器及备份回归通过；真实 RAW+JPEG/ProRAW 与 Xcode Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/PhotoSource.swift",
+      "line": 105
+    },
+    {
+      "id": "P1-06",
+      "title": "关闭自动备份后，已排队后台任务仍可上传",
+      "status": "实现已改，外部验收未完成",
+      "change": "关闭 automatic 时取消排队请求及活动自动任务；后台入口重新核验开关与配对。",
+      "evidence": "Swift 语法通过；真实关闭开关/后台唤醒行为 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/BackgroundScheduler.swift",
+      "line": 19
+    },
+    {
+      "id": "P1-07",
+      "title": "后台过期取消不能结束导出/上传等待，后续调度可能中断",
+      "status": "实现已改，外部验收未完成",
+      "change": "取消传播到 PhotoKit requestData ID、URLSession 等待者及网络探测；BG 完成回调只执行一次，提前排下一机会。",
+      "evidence": "Swift 语法通过；后台过期/锁屏/iCloud/挂起恢复 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/PhotoSource.swift",
+      "line": 62
+    },
+    {
+      "id": "P1-08",
+      "title": "单个不可处理资源会持续阻塞后续全部备份",
+      "status": "实现已改，外部验收未完成",
+      "change": "按稳定资源键保存失败，单项失败继续其他资产；网络/鉴权/暂停等全局错误中断；失败项在后续遍历重试。",
+      "evidence": "代码与语法检查；真实失败 PhotoKit 资源、权限变更和恢复队列 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/SyncState.swift",
+      "line": 177
+    },
+    {
+      "id": "P1-09",
+      "title": "二次备份遗漏 MOV/DNG，且不备份 Live Photo 关联清单",
+      "status": "本地验证通过",
+      "change": "合并照片索引和全部已完成 native 资源，备份本地/S3 manifest；保留原名、Live Photo 关联、摘要和时间。",
+      "evidence": "HEIC+MOV+DNG 三资源本地备份/恢复哈希通过；mock S3 清单与 SHA256 参数通过；未调用真实云端。",
+      "file": "engine/ai_photos/backup.py",
+      "line": 14
+    },
+    {
+      "id": "P1-10",
+      "title": "接收暂存与图片目录跨卷时无法完成传输",
+      "status": "本地验证通过",
+      "change": "在目标卷创建并验证临时副本，再同目录原子发布；DB 提交后才清理 staging。",
+      "evidence": "禁止跨目录 rename 的 EXDEV 故障注入通过；>4GiB 服务重启续传通过。物理双卷/断电仍未验。",
+      "file": "engine/ai_photos/sync.py",
+      "line": 374
+    },
+    {
+      "id": "P1-11",
+      "title": "备份静默忽略已修改、丢失或不可访问的索引文件",
+      "status": "本地验证通过",
+      "change": "丢失、过期、越界、损坏条目显式 issues/complete=false；CLI 非零，GUI 不再显示无条件成功。",
+      "evidence": "修改原片但未重新扫描时备份无写入，返回未完成；源缺口不会静默省略。",
+      "file": "engine/ai_photos/backup.py",
+      "line": 65
+    },
+    {
+      "id": "P2-01",
+      "title": "扫描与上传争用 SQLite 写锁，错误未按协议返回",
+      "status": "本地验证通过",
+      "change": "缩短 SQLite 写事务，解码/推理前释放 writer；存储忙返回可重试 JSON 503。",
+      "evidence": "阻塞推理期间另一 writer 成功；HTTP 锁异常返回 JSON 503，无断连。",
+      "file": "engine/ai_photos/catalog.py",
+      "line": 241
+    },
+    {
+      "id": "P2-02",
+      "title": "Python 3.11 的扫描防链接逻辑漏掉 NTFS junction",
+      "status": "本地验证通过",
+      "change": "扫描拒绝 NTFS reparse/junction，并核验子目录最终范围。",
+      "evidence": "实际 NTFS junction 外部图片不被扫描。",
+      "file": "engine/ai_photos/catalog.py",
+      "line": 141
+    },
+    {
+      "id": "P2-03",
+      "title": "相似照片预筛选漏掉阈值 4/5 内的哈希对",
+      "status": "本地验证通过",
+      "change": "相似哈希用阈值+1 个不重叠 band，修复默认距离4的漏召回。",
+      "evidence": "四个旧 band 各差1 bit 的构造对可被找出，精确去重原测试仍通过。",
+      "file": "engine/ai_photos/duplicates.py",
+      "line": 120
+    },
+    {
+      "id": "P2-04",
+      "title": "安装 HEIC 解码器后不重试既有失败缩略图",
+      "status": "本地验证通过",
+      "change": "显式扫描会重试原先缩略图失败条目。",
+      "evidence": "解码器从不可用变可用后，未变化 HEIC 会重新处理并清除错误。",
+      "file": "engine/ai_photos/catalog.py",
+      "line": 186
+    },
+    {
+      "id": "P2-05",
+      "title": "原生导入对同内容不同文件名仍产生多份文件",
+      "status": "本地验证通过",
+      "change": "相同格式字节以摘要寻址；多个逻辑资源保留独立关联/原名。",
+      "evidence": "同字节不同原名/资产只产生一份正常资源文件，仍保留两个完成逻辑任务。",
+      "file": "engine/ai_photos/sync.py",
+      "line": 352
+    },
+    {
+      "id": "P2-06",
+      "title": "崩溃遗留导出/分块文件与未完成任务缺乏维护机制",
+      "status": "实现已改，外部验收未完成",
+      "change": "后台 taskDescription 持久关联 chunk 文件；旧任务结束后清理孤块/导出；检查点每逻辑资源保留当前版本；Windows 提供不完整 staging 显式取消及磁盘保留空间。",
+      "evidence": "Windows 取消 staging 和拒绝删除完整原片通过；iOS 崩溃重启/低存储清理及 SQLite 生命周期 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/BackgroundChunkUploader.swift",
+      "line": 137
+    },
+    {
+      "id": "P2-07",
+      "title": "配对凭证未绑定服务器地址，且没有实施文档中的 ts.net 限制",
+      "status": "实现已改，外部验收未完成",
+      "change": "只接受私有 HTTPS ts.net/443 origin，拒绝重定向；凭证绑定 origin/receiver，地址变化断开配对。",
+      "evidence": "代码与语法检查；真实 Tailscale/iPhone 配对、改地址、TLS 与重定向实测 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/SyncAPI.swift",
+      "line": 84
+    },
+    {
+      "id": "P2-08",
+      "title": "Wi-Fi only 不是贯穿整个备份过程的明确蜂窝网络策略",
+      "status": "实现已改，外部验收未完成",
+      "change": "上传显式禁止蜂窝/昂贵/受限网络；严格 Wi-Fi 模式不自动取 iCloud-only 原片，UI 解释原因；策略变化取消当前任务。",
+      "evidence": "策略为保守失败，不声称 PhotoKit 具备蜂窝开关；真实切网与 iCloud 行为 Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/PhotoSource.swift",
+      "line": 145
+    },
+    {
+      "id": "P2-09",
+      "title": "照片无 EXIF 或视频的原始拍摄时间未被同步清单保留",
+      "status": "实现已改，外部验收未完成",
+      "change": "协议、DB、manifest 保存 PHAsset 时间；索引无 EXIF 时回填拍摄时间，WinUI 优先显示拍摄时间。",
+      "evidence": "PNG 接收时间/原名回归通过，C# 编译通过；真实 EXIF/QuickTime/时区/iPhone Not Verified。",
+      "file": "ios/PhotosCompanion/Sources/SyncAPI.swift",
+      "line": 25
+    },
+    {
+      "id": "P2-10",
+      "title": "同步语义查询堵塞 worker 请求，桥接没有超时/取消",
+      "status": "本地验证通过",
+      "change": "语义搜索使用有界独立槽；worker 管理请求保持可处理，C# 等待支持超时/取消并清理 pending。",
+      "evidence": "阻塞语义查询时 ping 可先返回；Windows 编译通过。超时取消的是等待，不承诺已经终止 Python 推理。",
+      "file": "engine/ai_photos/worker.py",
+      "line": 89
+    },
+    {
+      "id": "P2-11",
+      "title": "AI 工件未固定不可变版本，installed 不等于可用",
+      "status": "实现已改，外部验收未完成",
+      "change": "固定 HF revision、模型 SHA 清单和依赖 hashes；加载失败不再报告 ready，保留显式修复入口；提供依赖元数据清单。",
+      "evidence": "损坏/未验证/加载失败模型状态单测通过；依赖锁已解析，31 Python/17 NuGet 元数据已记录；真实模型/完整再分发验收未完成。",
+      "file": "engine/ai_photos/semantic.py",
+      "line": 84
+    },
+    {
+      "id": "P3-01",
+      "title": "同步管理界面主要依赖手动刷新",
+      "status": "本地验证通过",
+      "change": "同步窗口每3秒刷新，禁止刷新请求重入，确认操作期间保留行；窗口关闭停止 timer。",
+      "evidence": "本机隔离 WinUI 启动、窗口打开、暂停/恢复往返 worker、正常退出已实测；真实设备海量任务 UI 未验。",
+      "file": "src/WindowsAIPhotos/SyncManagement.cs",
+      "line": 202
+    },
+    {
+      "id": "P3-02",
+      "title": "架构文档仍称没有 HTTP 服务",
+      "status": "本地验证通过",
+      "change": "更新架构、双语 README、恢复/格式/网络能力边界及 release gates。",
+      "evidence": "原 No HTTP server 断言已修正，文档区分传输/索引/副本/验证状态。",
+      "file": "docs/ARCHITECTURE.md",
+      "line": 25
+    },
+    {
+      "id": "P3-03",
+      "title": "CI 未覆盖 iOS 和实际输出目录的跨端冒烟",
+      "status": "实现已改，外部验收未完成",
+      "change": "CI 补真实输出 worker/web 冒烟和 macOS 无签名 iOS simulator build。",
+      "evidence": "仅修改配置，未推送、触发或重跑 GitHub Actions；Mac job 执行结果 Not Verified。",
+      "file": ".github/workflows/ci.yml",
+      "line": 39
+    }
+  ]
+}

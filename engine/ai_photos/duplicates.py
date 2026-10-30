@@ -11,11 +11,12 @@ from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .catalog import PhotoCatalog
+from .file_safety import open_source
 
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as f:
+    with open_source(path) as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -114,8 +115,10 @@ def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4) -> dict:
     exact = [sorted(v) for v in by_sha.values() if len(v) > 1]
     exact.sort(key=lambda x: (-len(x), x[0]))
 
-    # Four 16-bit bands: any 64-bit hashes within Hamming distance <=5
-    # share at least one band. Avoid quadratic comparisons for identical hashes.
+    # At most d differing bits leave one of d+1 disjoint bands unchanged.
+    # Four bands cannot guarantee recall for the default distance of four.
+    bands = similar_distance + 1
+    boundaries = [(64 * i // bands, 64 * (i + 1) // bands) for i in range(bands)]
     buckets = defaultdict(set)
     by_hash = defaultdict(list)
     for photo_id, phash in unique_content:
@@ -125,15 +128,15 @@ def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4) -> dict:
     edges = set()
     for phash in hashes:
         candidates = set()
-        for band in range(4):
-            key = (band, (phash >> (16 * band)) & 0xFFFF)
+        for band, (start, end) in enumerate(boundaries):
+            key = (band, (phash >> start) & ((1 << (end - start)) - 1))
             candidates.update(buckets[key])
         for other in candidates:
             if (phash ^ other).bit_count() <= similar_distance:
                 a, b = by_hash[phash][0], by_hash[other][0]
                 edges.add((min(a, b), max(a, b)))
-        for band in range(4):
-            buckets[(band, (phash >> (16 * band)) & 0xFFFF)].add(phash)
+        for band, (start, end) in enumerate(boundaries):
+            buckets[(band, (phash >> start) & ((1 << (end - start)) - 1))].add(phash)
     # Different byte content can produce the same perceptual hash.
     for ids in by_hash.values():
         if len(ids) > 1:

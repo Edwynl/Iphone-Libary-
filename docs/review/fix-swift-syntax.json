@@ -1,0 +1,47 @@
+{
+  "parser": "tree-sitter-swift 0.7.4",
+  "note": "Grammar only; Xcode type/API checking and real iPhone remain Not Verified.",
+  "files": [
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\BackgroundChunkUploader.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\BackgroundScheduler.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\CancellationGate.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\CheckpointStore.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\ContentView.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\KeychainStore.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\PhotosCompanionApp.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\PhotoSource.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\SyncAPI.swift",
+      "has_error": false
+    },
+    {
+      "file": "ios\\PhotosCompanion\\Sources\\SyncState.swift",
+      "has_error": false
+    }
+  ],
+  "passed": true
+}

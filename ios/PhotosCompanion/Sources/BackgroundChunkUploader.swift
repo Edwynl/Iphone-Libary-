@@ -14,7 +14,7 @@ final class BackgroundChunkUploader: NSObject, URLSessionDataDelegate, URLSessio
     private struct Pending {
         var responseBody: Data
         let file: URL
-        let continuation: CheckedContinuation<Result, Error>
+        var continuation: CheckedContinuation<Result, Error>?
     }
     private let lock = NSLock()
     private var pending: [Int: Pending] = [:]
@@ -27,6 +27,7 @@ final class BackgroundChunkUploader: NSObject, URLSessionDataDelegate, URLSessio
         configuration.isDiscretionary = false
         configuration.waitsForConnectivity = true
         configuration.httpMaximumConnectionsPerHost = 2
+        configuration.timeoutIntervalForResource = 300
         return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
     }()
 
@@ -63,12 +64,38 @@ final class BackgroundChunkUploader: NSObject, URLSessionDataDelegate, URLSessio
         lock.unlock()
         // After a process relaunch, an old upload may have no in-memory continuation.
         // It still completes on Windows; resume later by querying its committed offset.
-        guard let entry else { return }
+        guard let entry else {
+            if let name = task.taskDescription, name.hasSuffix(".part"),
+               UUID(uuidString: String(name.dropLast(5))) != nil {
+                try? FileManager.default.removeItem(at: Self.chunkFolder.appendingPathComponent(name))
+            }
+            return
+        }
         try? FileManager.default.removeItem(at: entry.file)
-        if let error { entry.continuation.resume(throwing: error); return }
+        if let error { entry.continuation?.resume(throwing: error); return }
         let response = task.response as? HTTPURLResponse
-        entry.continuation.resume(returning: Result(status: response?.statusCode ?? 0,
+        entry.continuation?.resume(returning: Result(status: response?.statusCode ?? 0,
                                                      body: entry.responseBody))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // Never redirect a paired bearer credential.
+    }
+
+    private static var chunkFolder: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("upload-chunks", isDirectory: true)
+    }
+
+    private func cancelAwaiter(_ task: URLSessionTask) {
+        lock.lock()
+        let continuation = pending[task.taskIdentifier]?.continuation
+        pending[task.taskIdentifier]?.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+        task.cancel() // Keep its file until URLSession's completion callback.
     }
 
     func outstandingTaskCount() async -> Int {
@@ -81,7 +108,15 @@ final class BackgroundChunkUploader: NSObject, URLSessionDataDelegate, URLSessio
         // A newly relaunched process should not race with a transfer still running
         // in the iOS networking daemon. Never delete or overwrite the source photo.
         for _ in 0..<30 {
-            if await outstandingTaskCount() == 0 { return }
+            if await outstandingTaskCount() == 0 {
+                if FileManager.default.fileExists(atPath: Self.chunkFolder.path) {
+                    for file in try FileManager.default.contentsOfDirectory(at: Self.chunkFolder, includingPropertiesForKeys: nil)
+                        where file.pathExtension == "part" {
+                        try FileManager.default.removeItem(at: file)
+                    }
+                }
+                return
+            }
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
@@ -90,19 +125,22 @@ final class BackgroundChunkUploader: NSObject, URLSessionDataDelegate, URLSessio
     }
 
     func upload(request: URLRequest, bytes: Data) async throws -> Result {
-        let folder = FileManager.default.urls(for: .applicationSupportDirectory,
-                                              in: .userDomainMask)[0]
-            .appendingPathComponent("upload-chunks", isDirectory: true)
+        try Task.checkCancellation()
+        let gate = CancellationGate()
+        let folder = Self.chunkFolder
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appendingPathComponent(UUID().uuidString + ".part")
         try bytes.write(to: file, options: .atomic)
-        return try await withCheckedThrowingContinuation { continuation in
-            let task = session.uploadTask(with: request, fromFile: file)
-            lock.lock()
-            pending[task.taskIdentifier] = Pending(responseBody: Data(), file: file,
-                                                   continuation: continuation)
-            lock.unlock()
-            task.resume()
-        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.uploadTask(with: request, fromFile: file)
+                task.taskDescription = file.lastPathComponent
+                lock.lock()
+                pending[task.taskIdentifier] = Pending(responseBody: Data(), file: file, continuation: continuation)
+                lock.unlock()
+                gate.install { self.cancelAwaiter(task) }
+                task.resume()
+            }
+        } onCancel: { gate.cancel() }
     }
 }

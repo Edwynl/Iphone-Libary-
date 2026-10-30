@@ -1,0 +1,10 @@
+{
+  "method": "Native UI via cua_repl on isolated application process",
+  "startup_empty_library": true,
+  "sync_dialog_opened": true,
+  "pause_button_changed_to_resume": true,
+  "resume_button_changed_to_pause": true,
+  "paused_final": "false",
+  "server_enabled": false,
+  "notes": "Observed main window, opened Manage Sync, paused and resumed through GUI, closed dialog and requested normal app exit. No real media or Tailscale settings used."
+}

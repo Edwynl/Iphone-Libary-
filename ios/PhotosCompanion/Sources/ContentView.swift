@@ -42,6 +42,8 @@ struct ContentView: View {
                     Toggle("Allow automatic background sync", isOn: $sync.automatic)
                         .disabled(!sync.isPaired)
                     Toggle("Wi-Fi only", isOn: $sync.wifiOnly)
+                    Text("Strict Wi-Fi mode reads local originals only because PhotoKit cannot prohibit cellular access per download. For iCloud-only originals, download them in Photos first, or turn this off to allow system iCloud retrieval and cellular transfer.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text("iOS schedules background opportunities; syncing may pause while the app is closed. Force quitting disables automatic relaunch. Open this app to complete an initial large library transfer.")
                         .font(.caption).foregroundStyle(.secondary)
                 }

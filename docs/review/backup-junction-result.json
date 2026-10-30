@@ -1,0 +1,15 @@
+{
+  "original_b_before_sha256": "69c0968d87945cf84f13efbfdafde032b66d43ddce05572eef2def85173cc85f",
+  "original_b_after_sha256": "ef504a6a99a0bcd1b509be3a4281c6bfbc65fcfb2ea2a415d2e7d11c7644364e",
+  "original_b_overwritten_with_a": true,
+  "backup_result": {
+    "mode": "local",
+    "dry_run": false,
+    "files": 1,
+    "copied": 1,
+    "unchanged": 0,
+    "bytes_planned": 90,
+    "target": "C:\\Antigravity\\Claude Project\\Windows AI Photos\\docs\\review\\backup-junction-data\\backup",
+    "note": "No originals removed or modified"
+  }
+}

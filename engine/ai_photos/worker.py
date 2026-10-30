@@ -31,6 +31,7 @@ class Worker:
         self._send_lock = threading.Lock()
         self._job_lock = threading.Lock()
         self._busy = False
+        self._search_lock = threading.Lock()
         self.mobile_server = None
         self.sync_manager = SyncManager(self.catalog, default_inbox())
 
@@ -84,6 +85,19 @@ class Worker:
             if action in ("scan", "install_model", "duplicates", "backup_local", "backup_s3"):
                 self._background(request_id, action, params)
                 return
+            if action == 'search' and self.encoder.installed:
+                if not self._search_lock.acquire(blocking=False):
+                    raise RuntimeError('Search already running; retry when it completes')
+                def search():
+                    try:
+                        result = self.catalog.search(params.get('query', ''), params.get('limit', 120), self.encoder)
+                        self.send({'id': request_id, 'ok': True, 'data': result})
+                    except Exception as exc:
+                        self.send({'id': request_id, 'ok': False, 'error': str(exc)})
+                    finally:
+                        self._search_lock.release()
+                threading.Thread(target=search, name='search', daemon=True).start()
+                return
             if action == "start_mobile":
                 if self.mobile_server is None:
                     self.mobile_server = MobileServer(self.catalog, port=int(params.get("port", 8787)),
@@ -105,6 +119,8 @@ class Worker:
                 data = self.sync_manager.set_paused(bool(params.get("paused", True)))
             elif action == "sync_revoke_device":
                 data = self.sync_manager.revoke_device(params["device_id"])
+            elif action == 'sync_cancel_transfer':
+                data = self.sync_manager.cancel(params['device_id'], params['transfer_id'])
             elif action == "add_folder":
                 data = self.catalog.add_folder(params["path"])
             elif action == "folders":
@@ -121,6 +137,7 @@ class Worker:
             elif action == "status":
                 data = self.catalog.stats(self.encoder.model_id)
                 data["ai_installed"] = self.encoder.installed
+                data['ai_error'] = getattr(self.encoder, 'last_error', '')
                 data["busy"] = self._busy
             elif action == "ping":
                 data = {"pong": True}

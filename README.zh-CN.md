@@ -76,3 +76,13 @@ $env:PYTHONPATH = (Resolve-Path .\engine).Path
 
 ⚠️ 目前通过的是 Windows Python 协议测试及 Swift 语法检查，**尚未在 Xcode 和真实 iPhone 编译及验证**。
 请先阅读 [`docs/PHASE2_NATIVE_SYNC.md`](docs/PHASE2_NATIVE_SYNC.md)，不要把它当成已发布软件。
+
+## 审查修复后的能力边界
+
+- 原生 MOV、MP4、DNG 与 Live Photo 双资源都纳入二次备份清单，保存原名、资产关联、拍摄时间和 SHA-256。
+- 本地备份拒绝 junction、符号链接和重解析输出路径；过期、离线、缺失或损坏条目会明确标记未完成。
+- `restore-local 备份目录 独立空目录` 默认只验证；加 `--apply` 才复制。不会覆盖已有文件，也不重建 Apple Photos 相册或编辑历史。
+- iPhone 完成记录绑定 Windows 接收端身份，跳过前向服务器核验；更换电脑须重新配对。
+- 严格“仅 Wi-Fi”只导出手机已下载的原片，因为 PhotoKit 没有逐请求禁止蜂窝下载的接口。iCloud 原片需先在 Photos 下载，或明确关闭此限制。
+- AI 安装改用固定模型 revision 和 SHA-256 清单，依赖锁在 `engine/requirements-ai.lock.txt`；该锁针对 Windows Python 3.11，真实模型与 iPhone 仍需实测。
+- 当前未签名发布、未合并 PR、未运行云端 CI。完整修复验证与剩余门槛见 `docs/review/FIX_VALIDATION.md`。

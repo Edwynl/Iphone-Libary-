@@ -9,7 +9,7 @@ public sealed class PhotoCard
     public string Subtitle { get; init; } = "";
     public BitmapImage? Thumbnail { get; init; }
 
-    public static PhotoCard Create(string path, string filename, string? thumbnail, long mtimeNanoseconds)
+    public static PhotoCard Create(string path, string filename, string? thumbnail, long mtimeNanoseconds, string? takenAt = null)
     {
         var sourcePath = !string.IsNullOrWhiteSpace(thumbnail) && File.Exists(thumbnail)
             ? thumbnail : path;
@@ -30,7 +30,11 @@ public sealed class PhotoCard
         string subtitle = "";
         try
         {
-            var date = DateTimeOffset.FromUnixTimeMilliseconds(mtimeNanoseconds / 1_000_000);
+            var date = (DateTimeOffset.TryParse(takenAt, out var capture) ||
+                DateTimeOffset.TryParseExact(takenAt, "yyyy:MM:dd HH:mm:ss",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeLocal, out capture)) ? capture
+                : DateTimeOffset.FromUnixTimeMilliseconds(mtimeNanoseconds / 1_000_000);
             subtitle = date.LocalDateTime.ToString("yyyy-MM-dd");
         }
         catch (ArgumentOutOfRangeException) { }

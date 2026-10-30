@@ -14,8 +14,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: python -m pip install -r engine/requirements-test.txt
+          python-version: '3.11'
+      - run: python -m pip install --require-hashes -r engine/requirements-test.lock.txt
       - run: python -m pytest -q tests/
 
   windows-build:
@@ -29,3 +29,18 @@ jobs:
         run: dotnet restore src/WindowsAIPhotos/WindowsAIPhotos.csproj -p:Platform=x64
       - name: Build WinUI
         run: dotnet build src/WindowsAIPhotos/WindowsAIPhotos.csproj -p:Platform=x64 -c Release --no-restore
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --require-hashes -r engine/requirements-test.lock.txt
+      - name: Shipped worker and static resources smoke test
+        run: python scripts/smoke-output.py src/WindowsAIPhotos/bin/x64/Release/net10.0-windows10.0.19041.0/engine
+
+  ios-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Unsigned simulator compile
+        run: bash scripts/build-ios.sh

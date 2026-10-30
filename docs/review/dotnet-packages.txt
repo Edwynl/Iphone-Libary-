@@ -1,0 +1,24 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+Project 'WindowsAIPhotos' has the following package references
+   [net10.0-windows10.0.19041.0]: 
+   Top-level Package              Requested   Resolved
+   > Microsoft.WindowsAppSDK      2.6.4       2.6.4   
+
+   Transitive Package                                    Resolved       
+   > Microsoft.Web.WebView2                              1.0.3719.77    
+   > Microsoft.Windows.AI.MachineLearning                2.4.89         
+   > Microsoft.Windows.SDK.BuildTools                    10.0.26100.4654
+   > Microsoft.Windows.SDK.BuildTools.MSIX               1.7.251221100  
+   > Microsoft.WindowsAppSDK.AI                          2.6.4          
+   > Microsoft.WindowsAppSDK.Base                        2.6.4          
+   > Microsoft.WindowsAppSDK.DWrite                      2.6.4          
+   > Microsoft.WindowsAppSDK.Foundation                  2.6.4          
+   > Microsoft.WindowsAppSDK.InteractiveExperiences      2.6.4          
+   > Microsoft.WindowsAppSDK.ML                          2.6.4          
+   > Microsoft.WindowsAppSDK.Runtime                     2.6.4          
+   > Microsoft.WindowsAppSDK.Search                      2.6.4          
+   > Microsoft.WindowsAppSDK.Widgets                     2.6.4          
+   > Microsoft.WindowsAppSDK.WinUI                       2.6.4          
+   > System.Numerics.Tensors                             9.0.0          
+

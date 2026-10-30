@@ -13,7 +13,7 @@ struct PhotosCompanionApp: App {
                 .onChange(of: phase) { _, current in
                     if current == .active && sync.automatic && sync.isPaired {
                         BackgroundScheduler.schedule()
-                        Task { await sync.syncNow(maxAssets: 100) }
+                        Task { await sync.automaticPass(maxAssets: 100) }
                     }
                 }
         }

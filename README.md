@@ -47,7 +47,7 @@ dotnet run --project .\src\WindowsAIPhotos\WindowsAIPhotos.csproj -p:Platform=x6
 For AI content search (large downloads and local model only after explicit opt-in):
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r .\engine\requirements-ai.txt
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r .\engine\requirements-ai.lock.txt
 # Then click "Install AI model" in the app (~1.5GB weight download)
 # Click Scan again so the AI creates vectors for existing photos.
 ```
@@ -77,8 +77,9 @@ Do not expect these features in this MVP.
 
 - Database and previews live in `%LOCALAPPDATA%\WindowsAIPhotos` (or
   `AI_PHOTOS_HOME` for tests and custom locations).
-- Original photos are read-only. The app does not move, write, delete, duplicate
-  or upload photos; only indexes/previews are deleted when a source disappears.
+- Original photos are read-only. Explicit import/backup operations create copies;
+  they never delete or modify source originals. Backup outputs reject linked and
+  Windows reparse paths. Only catalog records are pruned when a source disappears.
 - The **Install AI** action uses an HTTPS model download from Hugging Face.
   This downloads weights and processing files, **not the user's photos**.
 - The app does not contain telemetry or advertisements. The optional iPhone companion enables a localhost-only token-protected upload service only when explicitly started.
@@ -181,3 +182,27 @@ Run on a **Mac with Xcode + XcodeGen**: `bash scripts/build-ios.sh`. There is
 not yet a verified iPhone build, Apple TestFlight distribution, or a signed
 Windows executable. Tests currently exercise the Windows sync protocol only.
 Install `pip install -r engine/requirements-heic.txt` for optional HEIC previews.
+
+## Verified resource backup manifests
+
+Local and S3 backup plans include completed native video/DNG/Live Photo resources,
+with a JSON manifest retaining original names, asset associations, capture times
+and hashes. Stale, offline or corrupt entries are reported as incomplete instead
+of silently skipped. Local output rejects junction/symlink/reparse paths.
+
+```powershell
+# Verify a local backup and plan restoration into an EMPTY independent directory:
+python -m ai_photos.cli restore-local 'E:\Photo Backup' 'F:\Restored Photos'
+# Explicit copy; existing destination files are never overwritten:
+python -m ai_photos.cli restore-local 'E:\Photo Backup' 'F:\Restored Photos' --apply
+```
+
+This restores original resource files plus their manifest; it does not recreate
+Apple Photos albums/edits or provide a cloud restore GUI. No E2EE is implemented.
+The native app now requires a private `https://...ts.net` origin. Changing the
+computer requires re-pairing. Strict Wi-Fi mode exports only local originals;
+PhotoKit cannot prohibit cellular access per iCloud request, so download iCloud
+originals in Photos first or explicitly disable this restriction. iOS scheduling
+and these repairs still require Mac/Xcode and real iPhone acceptance testing.
+
+See `docs/review/FIX_VALIDATION.md` for the local repair evidence and open gates.
