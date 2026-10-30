@@ -46,3 +46,12 @@
 - iOS native app QA on physical devices; Safari web UI cannot guarantee automatic background sync.
 - 50k image duplicate scan benchmarks; never assume perceptual hashes prove identity.
 - S3 restore and integrity drills; test least-privilege bucket credentials.
+
+
+## Phase 2 implementation (2026-10-30)
+
+The native SwiftUI app, PhotoKit export, best-effort background scheduling,
+per-device pairing, resumable chunk protocol, and Windows transfer-management
+surface are on `feat/iphone-native-resumable-sync`. See `PHASE2_NATIVE_SYNC.md`.
+**Still to validate:** iOS physical device / Xcode, Windows WinUI build,
+Tailscale remote transfer and >4 GiB videos.

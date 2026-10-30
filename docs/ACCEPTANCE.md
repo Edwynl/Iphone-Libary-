@@ -47,3 +47,11 @@
 3. `feat/file-watcher-and-cancel`: live updates, pause/resume, progress.
 4. `feat/standalone-onnx-runtime`: verified self-contained Windows inference.
 5. `feat/installer-signing`: MSIX/EXE, code signing, upgrade tests.
+
+
+## Phase 2 merge gate
+
+See `docs/PHASE2_NATIVE_SYNC.md`: native iOS Xcode build, real iPhone PhotoKit and Tailscale,
+HEIC/Live Photo/video hash integrity, resumability >4 GiB, and Windows WinUI sync-manager
+UI must all be tested before marking Phase 2 production-ready. Python server tests
+alone do not satisfy these gates.

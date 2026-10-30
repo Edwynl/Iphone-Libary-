@@ -19,6 +19,12 @@ from .config import SKIP_DIRS, SUPPORTED_EXTENSIONS, app_home
 
 LOG = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 150_000_000
+try:
+    import pillow_heif  # type: ignore[import-not-found]
+    pillow_heif.register_heif_opener()
+except ImportError:
+    # HEIC originals remain cataloged with an explicit decoder error.
+    pass
 
 
 def _connect(path: Path) -> sqlite3.Connection:

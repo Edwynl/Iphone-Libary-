@@ -25,3 +25,13 @@ models/
 # Artifacts
 artifacts/
 dist/
+
+# Generated macOS / XcodeGen projects, signing data and build outputs
+.DS_Store
+ios/**/DerivedData/
+ios/**/build/
+ios/**/.build/
+ios/**/PhotosCompanion.xcodeproj/
+*.xcuserstate
+*.mobileprovision
+*.p12
