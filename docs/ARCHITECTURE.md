@@ -87,16 +87,32 @@ status and management responsive. Bridge waits are bounded and accept cancellati
 ## Resource backup and recovery after review fixes
 
 - `photos` remains the browse/index table. Completed native resources are also
-  included in both backup plans, including MOV/MP4/DNG. A version 1 JSON manifest
+  included in both backup plans, including MOV/MP4/DNG. JSON manifests
   retains original names, per-device asset/resource associations, capture dates,
   SHA-256, sizes and backup paths. One physical file may have several logical refs.
 - Missing, stale, unsafe or corrupt entries make `complete=false`; CLI returns 2.
   The desktop UI requires reconciliation instead of showing unconditional success.
 - Local output uses validated, pinned non-reparse directories; Windows leases
   prevent directory replacement and keep the leaf nonempty during writes.
+- Local v2 backups publish immutable `objects/<sha-prefix>/<sha><extension>`
+  files with `replace=False`, then verify all references and publish an immutable
+  `snapshots/<id>.json`. Only a verified full run replaces the root
+  `backup-manifest.json` last-successful selection. The root is a complete manifest
+  copy, so the default restore interface stays usable. If publication reports an
+  error after atomic rename, `latest_published` reflects visibility of the new
+  complete manifest; the result still reports incomplete/uncertain durability.
+- A manifest separates `backup_path` (content object) from `restore_path`
+  (original root/name). Repeated names and native asset associations survive
+  content sharing. Old v1 manifests are archived before successful migration;
+  their flat files are never overwritten. No history retention deletion or orphan
+  object GC is automatic. This is not a globally atomic filesystem snapshot of
+  changing sources or a guarantee against physical power-loss/media failure.
 - `restore-local BACKUP EMPTY_TARGET` verifies hashes and paths; `--apply` copies
   into an independent empty target without overwriting existing files, and emits
   a restored resource manifest. It does not recreate an Apple Photos library.
+- `backup-history BACKUP` lists complete snapshot metadata; `restore-local ...
+  --snapshot ID` selects history. Restore preflights every referenced checksum,
+  size and safe output path before copying. Existing v1 snapshots are supported.
 - S3 uses explicit SHA256 checksum negotiation and a resource manifest. No live
   provider upload/download or full cloud restore has been validated; bucket
   versioning, recovery drills and optional client-side encryption remain gates.

@@ -63,6 +63,20 @@ def test_backup_junction_never_overwrites_originals(tmp_path):
     assert before == (sha256_file(source / 'original.png'), (source / 'original.png').stat().st_mtime_ns)
 
 
+@pytest.mark.parametrize('child', ['objects', 'snapshots'])
+def test_snapshot_storage_junction_never_writes_into_originals(tmp_path, child):
+    cat, source = catalog_with_photo(tmp_path)
+    before = (sha256_file(source / 'original.png'), (source / 'original.png').stat().st_mtime_ns)
+    target = tmp_path / 'backup'
+    target.mkdir()
+    link_directory(target / child, source)
+    result = backup_local(cat, target, apply=True)
+    assert not result['complete'] and result['issues']
+    assert not (target / 'backup-manifest.json').exists()
+    assert list(source.iterdir()) == [source / 'original.png']
+    assert before == (sha256_file(source / 'original.png'), (source / 'original.png').stat().st_mtime_ns)
+
+
 def test_writer_pins_parent_against_path_swap(tmp_path):
     parent = tmp_path / 'output'
     source = tmp_path / 'source'
@@ -178,7 +192,7 @@ def test_all_resources_and_live_relationships_survive_backup_restore(tmp_path):
     restored = tmp_path / 'restored'
     assert restore_local(backup, restored, apply=True)['files'] == 3
     for entry in manifest['files']:
-        assert sha256_file(restored / entry['backup_path']) == entry['sha256']
+        assert sha256_file(restored / entry['restore_path']) == entry['sha256']
 
 
 def test_stale_and_offline_sources_are_explicitly_incomplete(tmp_path):

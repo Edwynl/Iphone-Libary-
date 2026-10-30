@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from .catalog import PhotoCatalog
 from .duplicates import sha256_file
@@ -66,6 +70,88 @@ def _manifest(records, issues):
             'note': 'Contains original resource relationships and SHA-256; no source deletion.'}
 
 
+def _relative_path(value):
+    # Reject both Windows and POSIX traversal spellings on either OS.
+    if not isinstance(value, str) or not value or '\\' in value or ':' in value or value.startswith('/'):
+        raise ValueError('Unsafe manifest path')
+    parts = value.split('/')
+    reserved = {'CON', 'PRN', 'AUX', 'NUL', *('COM' + str(i) for i in range(1, 10)),
+                *('LPT' + str(i) for i in range(1, 10))}
+    if any(p in {'', '.', '..'} or p.endswith((' ', '.')) or
+           any(ord(c) < 32 or c in '<>"|?*' for c in p) or p.split('.')[0].upper() in reserved for p in parts):
+        raise ValueError('Unsafe manifest path')
+    return Path(*parts)
+
+
+def _snapshot_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r'(?:[0-9a-f]{32}|legacy-[0-9a-f]{64})', value):
+        raise ValueError('Invalid snapshot ID')
+    return value
+
+
+def _validate_manifest(manifest, *, require_complete=True):
+    if not isinstance(manifest, dict) or type(manifest.get('version')) is not int or manifest['version'] not in {1, 2}:
+        raise ValueError('A supported backup manifest is required')
+    if type(manifest.get('complete')) is not bool or (require_complete and not manifest['complete']):
+        raise ValueError('A complete backup manifest is required')
+    if not isinstance(manifest.get('files'), list):
+        raise ValueError('Invalid manifest file inventory')
+    if manifest['version'] == 2:
+        _snapshot_id(manifest.get('snapshot_id'))
+        if not isinstance(manifest.get('created_at'), str) or datetime.fromisoformat(manifest['created_at']).tzinfo is None:
+            raise ValueError('Invalid snapshot timestamp')
+    restore_paths = set()
+    for record in manifest['files']:
+        if not isinstance(record, dict) or not isinstance(record.get('folder'), str) or not Path(record['folder']).is_absolute():
+            raise ValueError('Invalid original resource root')
+        _relative_path(record.get('backup_path'))
+        restored = _relative_path(record.get('restore_path') if manifest['version'] == 2 else record['backup_path'])
+        # Windows is case-insensitive even when validation runs on another OS.
+        key = restored.as_posix().casefold()
+        if key in restore_paths:
+            raise ValueError('Duplicate restore path in manifest')
+        restore_paths.add(key)
+        if not isinstance(record.get('sha256'), str) or not re.fullmatch('[0-9a-f]{64}', record['sha256']):
+            raise ValueError('Invalid resource checksum')
+        if type(record.get('size')) is not int or record['size'] < 0:
+            raise ValueError('Invalid resource size')
+    return manifest
+
+
+def _immutable_manifest(directory, name, payload):
+    try:
+        directory.write(name, payload, replace=False)
+    except FileExistsError:
+        with directory.open_read(name) as stream:
+            if stream.read() != payload:
+                raise ValueError('Existing immutable snapshot differs; refusing overwrite')
+
+
+def _preserve_previous(target, previous):
+    if previous is None:
+        return
+    payload, manifest = previous
+    if not manifest['complete']:
+        # Retain an old failed v1 attempt for inspection, never advertise it as
+        # a restorable snapshot. The new run still cannot publish on failure.
+        folder, name = target / '.previous-manifests', hashlib.sha256(payload).hexdigest()
+    elif manifest['version'] == 1:
+        folder, name = target / 'snapshots', 'legacy-' + hashlib.sha256(payload).hexdigest()
+    else:
+        folder, name = target / 'snapshots', manifest['snapshot_id']
+    with SafeDirectory(folder) as directory:
+        _immutable_manifest(directory, name + '.json', payload)
+
+
+def _previous_manifest(target):
+    try:
+        with open_source(target / 'backup-manifest.json') as stream:
+            payload = stream.read()
+    except FileNotFoundError:
+        return None
+    return payload, _validate_manifest(json.loads(payload), require_complete=False)
+
+
 def backup_local(catalog: PhotoCatalog, target: Path, *, apply=False) -> dict:
     roots, records, issues = _inventory(catalog)
     if not roots and not records and not issues:
@@ -73,44 +159,85 @@ def backup_local(catalog: PhotoCatalog, target: Path, *, apply=False) -> dict:
     target = _check_target(catalog, target, roots, records)
     copied = unchanged = total = 0
     saved = []
+    snapshot_id = None
+    latest_published = False
     # Fail closed before any writes if the indexed library cannot be accounted for.
     if not issues:
-        for record in records:
-            source = Path(record['path'])
-            relative = Path(record['root_id']) / record['relative']
-            out = target / relative
-            try:
-                digest = sha256_file(source)
-                current = source.stat()
-                if (current.st_size, current.st_mtime_ns) != (record['size'], record['mtime_ns']):
-                    raise OSError('Source changed after backup planning; rescan before retrying')
-                expected = {r['sha256'] for r in record['resources']}
-                if expected and expected != {digest}:
-                    raise OSError('Completed resource checksum no longer matches')
-                record = dict(record, sha256=digest, backup_path=relative.as_posix())
-                if not apply:
-                    total += record['size']
-                    continue
-                with SafeDirectory(out.parent) as directory:
+        try:
+            previous = _previous_manifest(target)
+            with SafeDirectory(target) if apply else nullcontext() as root_directory:
+                if apply:
+                    _preserve_previous(target, previous)
+                for record in records:
+                    source = Path(record['path'])
                     try:
-                        existing = directory.digest(out.name)
-                    except FileNotFoundError:
-                        existing = None
-                    if existing == digest:
-                        unchanged += 1
-                    else:
-                        directory.copy(source, out.name, expected=digest)
-                        copied += 1
-                        total += record['size']
-                saved.append(record)
-            except (OSError, ValueError) as exc:
-                issues.append({'path': str(source), 'error': str(exc)})
-        if apply:
-            with SafeDirectory(target) as directory:
-                directory.write('backup-manifest.json', json.dumps(_manifest(saved, issues), ensure_ascii=False, indent=2).encode())
+                        digest = sha256_file(source)
+                        current = source.stat()
+                        if (current.st_size, current.st_mtime_ns) != (record['size'], record['mtime_ns']):
+                            raise OSError('Source changed after backup planning; rescan before retrying')
+                        expected = {r['sha256'] for r in record['resources']}
+                        if expected and expected != {digest}:
+                            raise OSError('Completed resource checksum no longer matches')
+                        relative = Path('objects') / digest[:2] / (digest + source.suffix.lower())
+                        check_path(target / relative)
+                        restore_path = Path(record['root_id']) / record['relative']
+                        record = dict(record, sha256=digest, backup_path=relative.as_posix(),
+                                      restore_path=restore_path.as_posix())
+                        if not apply:
+                            total += record['size']
+                            continue
+                        with SafeDirectory(target / relative.parent) as directory:
+                            try:
+                                existing = directory.digest(relative.name)
+                            except FileNotFoundError:
+                                existing = None
+                            if existing == digest:
+                                unchanged += 1
+                            elif existing is not None:
+                                raise OSError('Immutable backup object is corrupt; retained without replacement')
+                            else:
+                                directory.copy(source, relative.name, expected=digest, replace=False)
+                                copied += 1
+                                total += record['size']
+                        saved.append(record)
+                    except (OSError, ValueError) as exc:
+                        issues.append({'path': str(source), 'error': str(exc)})
+                if apply and not issues:
+                    # Recheck every referenced object before publishing metadata.
+                    # Failed/interrupted runs leave only unreferenced objects;
+                    # they never replace bytes or the last successful manifest.
+                    for record in saved:
+                        path = target / record['backup_path']
+                        with SafeDirectory(path.parent) as directory:
+                            if directory.digest(path.name) != record['sha256']:
+                                raise OSError('Backup object failed final verification')
+                    candidate = uuid4().hex
+                    manifest = dict(_manifest(saved, []), version=2, snapshot_id=candidate,
+                                    created_at=datetime.now(timezone.utc).isoformat())
+                    _validate_manifest(manifest)
+                    payload = json.dumps(manifest, ensure_ascii=False, indent=2).encode()
+                    with SafeDirectory(target / 'snapshots') as directory:
+                        _immutable_manifest(directory, candidate + '.json', payload)
+                    snapshot_id = candidate
+                    try:
+                        root_directory.write('backup-manifest.json', payload)
+                        latest_published = True
+                    except OSError:
+                        # A filesystem can report a durability error after the
+                        # atomic rename. Report whether the complete pointer is
+                        # visible; do not roll it back or touch earlier history.
+                        try:
+                            with root_directory.open_read('backup-manifest.json') as stream:
+                                latest_published = stream.read() == payload
+                        except OSError:
+                            pass
+                        raise
+        except (OSError, ValueError) as exc:
+            issues.append({'path': str(target), 'error': str(exc)})
     return {'mode': 'local', 'dry_run': not apply, 'complete': not issues, 'issues': issues,
             'files': len(records), 'copied': copied, 'unchanged': unchanged, 'bytes_planned': total,
-            'target': str(target), 'note': 'Originals were not removed or modified'}
+            'target': str(target), 'snapshot_id': snapshot_id, 'latest_published': latest_published,
+            'note': 'Immutable snapshots retained; originals and previous backup versions are never replaced or deleted'}
 
 
 def backup_s3(catalog: PhotoCatalog, *, bucket: str, endpoint_url=None,
@@ -155,37 +282,88 @@ def backup_s3(catalog: PhotoCatalog, *, bucket: str, endpoint_url=None,
             'note': 'TLS transport; no client-side encryption. Enable bucket versioning and test restores.'}
 
 
-def restore_local(backup: Path, target: Path, *, apply=False) -> dict:
+def _load_snapshot(backup, snapshot=None):
+    name = _snapshot_id(snapshot) if snapshot is not None else None
+    path = backup / 'snapshots' / (name + '.json') if name else backup / 'backup-manifest.json'
+    try:
+        with open_source(path) as stream:
+            payload = stream.read()
+    except FileNotFoundError:
+        # A legacy current backup is usable before its first v2 migration too.
+        previous = _previous_manifest(backup) if name and name.startswith('legacy-') else None
+        if previous is None or 'legacy-' + hashlib.sha256(previous[0]).hexdigest() != name:
+            raise
+        payload = previous[0]
+    manifest = _validate_manifest(json.loads(payload))
+    if name:
+        actual = manifest.get('snapshot_id') if manifest['version'] == 2 else 'legacy-' + hashlib.sha256(payload).hexdigest()
+        if name != actual:
+            raise ValueError('Snapshot ID does not match manifest')
+    return manifest
+
+
+def backup_history(backup: Path) -> dict:
+    """List immutable, complete manifests; object bytes are checked at restore."""
+    backup = check_path(backup)
+    if not backup.is_dir():
+        raise ValueError('Backup directory not found')
+    snapshots = {}
+    issues = []
+    try:
+        previous = _previous_manifest(backup)
+    except (OSError, ValueError) as exc:
+        previous = None
+        issues.append({'path': str(backup / 'backup-manifest.json'), 'error': str(exc)})
+    latest = None
+    if previous and previous[1]['complete']:
+        latest = previous[1].get('snapshot_id') or 'legacy-' + hashlib.sha256(previous[0]).hexdigest()
+        snapshots[latest] = previous[1]
+    folder = check_path(backup / 'snapshots')
+    if folder.exists():
+        for path in sorted(folder.glob('*.json')):
+            try:
+                snapshots[path.stem] = _load_snapshot(backup, path.stem)
+            except (OSError, ValueError) as exc:
+                issues.append({'path': str(path), 'error': str(exc)})
+    rows = [{'snapshot_id': ident, 'created_at': value.get('created_at'), 'files': len(value['files']),
+             'latest': ident == latest, 'version': value['version']} for ident, value in snapshots.items()]
+    rows.sort(key=lambda row: (row['created_at'] or '', row['snapshot_id']), reverse=True)
+    return {'snapshots': rows, 'issues': issues, 'complete': not issues,
+            'note': 'Listing validates manifests; restore verifies every referenced file checksum'}
+
+
+def restore_local(backup: Path, target: Path, *, apply=False, snapshot=None) -> dict:
     backup = check_path(backup)
     target = check_path(target)
     if not backup.is_dir():
         raise ValueError('Backup directory not found')
     if target.exists() and any(target.iterdir()):
         raise ValueError('Choose an empty restore destination; existing files are never overwritten')
-    with open_source(backup / 'backup-manifest.json') as stream:
-        manifest = json.load(stream)
-    if manifest.get('version') != 1 or not manifest.get('complete'):
-        raise ValueError('A complete version 1 backup manifest is required')
+    manifest = _load_snapshot(backup, snapshot)
     if target == backup or backup in target.parents or target in backup.parents:
         raise ValueError('Restore destination must be independent of the backup')
-    count = 0
+    prepared = []
     for record in manifest['files']:
-        relative = Path(record['backup_path'])
-        if relative.is_absolute() or '..' in relative.parts or ':' in str(relative):
-            raise ValueError('Unsafe manifest path')
-        source = check_path(backup / relative)
+        source = check_path(backup / _relative_path(record['backup_path']))
         original_root = Path(record['folder']).resolve()
         if target == original_root or original_root in target.parents or target in original_root.parents:
             raise ValueError('Restore must not overlap original sources')
         if sha256_file(source) != record['sha256']:
             raise OSError('Backup checksum mismatch')
+        if source.stat().st_size != record['size']:
+            raise OSError('Backup size mismatch')
+        relative = _relative_path(record['restore_path'] if manifest['version'] == 2 else record['backup_path'])
         out = check_path(target / relative)
+        prepared.append((source, out, record['sha256']))
+    # Validate the entire inventory before starting a restore; never hide a
+    # missing/corrupt later resource behind a partially verified result.
+    for source, out, digest in prepared:
         if apply:
             with SafeDirectory(out.parent) as directory:
                 # Never overwrite an existing restore destination.
-                directory.copy(source, out.name, expected=record['sha256'], replace=False)
-        count += 1
+                directory.copy(source, out.name, expected=digest, replace=False)
     if apply:
         with SafeDirectory(target) as directory:
             directory.write('restored-resource-manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2).encode())
-    return {'mode': 'restore-local', 'dry_run': not apply, 'complete': True, 'files': count, 'target': str(target)}
+    return {'mode': 'restore-local', 'dry_run': not apply, 'complete': True, 'files': len(prepared),
+            'snapshot_id': manifest.get('snapshot_id', snapshot), 'target': str(target)}

@@ -12,7 +12,7 @@ struct PhotosCompanionApp: App {
                 .environmentObject(sync)
                 .onChange(of: phase) { _, current in
                     if current == .active && sync.automatic && sync.isPaired {
-                        BackgroundScheduler.schedule()
+                        sync.scheduleBackground()
                         Task { await sync.automaticPass(maxAssets: 100) }
                     }
                 }

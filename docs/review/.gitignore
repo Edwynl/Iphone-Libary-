@@ -17,6 +17,9 @@ next-*-temp*/
 next-agent-tests.log
 next-contract-tests.log
 next-restart-tests.log
+snapshot-initial-tests.log
+snapshot-contract-tests.log
+snapshot-swift-syntax.log
 fix-test-state/
 fix-gui-state/
 fix-large-transfer-data/

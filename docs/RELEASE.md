@@ -48,6 +48,10 @@
 - Dependency metadata inventory: `docs/DEPENDENCIES.md`; hashed Python locks target
   Python 3.11. AI model revision and artifact hashes are checked on explicit install.
 - New simulator CI configuration is present, but no GitHub Actions were triggered.
+- The next review delta adds immutable local backup snapshots, selected-history
+  restore, failure-boundary regression tests and the missed Swift scene-activation
+  scheduler handling. See `docs/review/PR3_BLOCKER_FIXES.md`; Swift/Xcode builds
+  still have not run locally. S3 retention/recovery is a separate open gate.
 - Still required: actual Xcode/API/type validation and physical iPhone matrix;
   real model inference and 50k–100k media workload; physical cross-volume/power-loss
   tests; real S3 provider recovery and immutable backup policy; exact license text

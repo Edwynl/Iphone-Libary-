@@ -81,7 +81,9 @@ $env:PYTHONPATH = (Resolve-Path .\engine).Path
 
 - 原生 MOV、MP4、DNG 与 Live Photo 双资源都纳入二次备份清单，保存原名、资产关联、拍摄时间和 SHA-256。
 - 本地备份拒绝 junction、符号链接和重解析输出路径；过期、离线、缺失或损坏条目会明确标记未完成。
+- 本地备份保存不可变 v2 快照和按 SHA-256 寻址的内容文件；照片变化不覆盖旧版本，失败批次不发布不完整清单，旧 v1 备份保留并可恢复。不会自动清理历史或中断遗留内容，需预留空间。此策略尚未应用到 S3。
 - `restore-local 备份目录 独立空目录` 默认只验证；加 `--apply` 才复制。不会覆盖已有文件，也不重建 Apple Photos 相册或编辑历史。
+- `backup-history 备份目录` 列出历史 ID；`restore-local 备份目录 独立空目录 --snapshot 快照ID --apply` 恢复指定版本，省略 `--snapshot` 则使用最后成功清单。
 - iPhone 完成记录绑定 Windows 接收端身份，跳过前向服务器核验；更换电脑须重新配对。
 - 严格“仅 Wi-Fi”只导出手机已下载的原片，因为 PhotoKit 没有逐请求禁止蜂窝下载的接口。iCloud 原片需先在 Photos 下载，或明确关闭此限制。
 - AI 安装改用固定模型 revision 和 SHA-256 清单，依赖锁在 `engine/requirements-ai.lock.txt`；该锁针对 Windows Python 3.11，真实模型与 iPhone 仍需实测。

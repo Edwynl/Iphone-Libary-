@@ -235,14 +235,14 @@ class SafeDirectory:
             except FileNotFoundError:
                 pass
 
-    def write(self, name, data):
+    def write(self, name, data, *, replace=True):
         temporary, output = self._temporary()
         try:
             with output:
                 output.write(data)
                 output.flush()
                 os.fsync(output.fileno())
-            self._commit(temporary, name, True)
+            self._commit(temporary, name, replace)
         finally:
             try:
                 self._unlink(temporary)

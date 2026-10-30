@@ -1,5 +1,17 @@
 # Claude review handoff
 
+## Latest: three PR #3 blockers
+
+Read [PR3_BLOCKER_FIXES.md](PR3_BLOCKER_FIXES.md) for the latest response to the
+review of `3886da6`: missed Swift throwing call, local history overwrite and
+last-good manifest invalidation. Local backups now publish immutable objects and
+v2 snapshots; restore supports retained snapshots and legacy v1 migration.
+Focus on exclusive publication/collision behavior, per-file and manifest failure
+boundaries, last-successful selection, original-name restore, legacy preservation
+and path safety. The report contains current evidence; older counts below remain
+historical. iOS SDK/type/device checks and the P2 PhotoKit full-scan cost remain
+open; do not infer native compile success from grammar checks.
+
 ## Follow-up after independent review on PR #2
 
 Read [FOLLOWUP_REVIEW_FIXES.md](FOLLOWUP_REVIEW_FIXES.md) first for the current

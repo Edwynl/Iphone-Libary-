@@ -190,11 +190,22 @@ with a JSON manifest retaining original names, asset associations, capture times
 and hashes. Stale, offline or corrupt entries are reported as incomplete instead
 of silently skipped. Local output rejects junction/symlink/reparse paths.
 
+Local backups now retain immutable v2 snapshots and content-addressed objects.
+Changing a photo creates a new version; previous snapshots remain restorable.
+A failed run keeps the last successful manifest usable. Existing v1 backups are
+preserved during migration and remain selectable. Nothing automatically prunes
+history or leftover objects from interrupted runs; plan storage accordingly.
+This policy applies to **local** backups; S3 still requires provider versioning
+and a separately verified recovery policy.
+
 ```powershell
 # Verify a local backup and plan restoration into an EMPTY independent directory:
 python -m ai_photos.cli restore-local 'E:\Photo Backup' 'F:\Restored Photos'
 # Explicit copy; existing destination files are never overwritten:
 python -m ai_photos.cli restore-local 'E:\Photo Backup' 'F:\Restored Photos' --apply
+# List retained snapshots, then restore a selected historical version:
+python -m ai_photos.cli backup-history 'E:\Photo Backup'
+python -m ai_photos.cli restore-local 'E:\Photo Backup' 'F:\Older Photos' --snapshot SNAPSHOT_ID --apply
 ```
 
 This restores original resource files plus their manifest; it does not recreate
