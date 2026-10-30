@@ -15,7 +15,8 @@ from .catalog import PhotoCatalog
 from .semantic import Siglip2Encoder
 from .duplicates import find_duplicates
 from .backup import backup_local, backup_s3
-from .mobile import MobileServer
+from .mobile import MobileServer, default_inbox
+from .sync import SyncManager
 from .organize import virtual_albums
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
@@ -31,6 +32,7 @@ class Worker:
         self._job_lock = threading.Lock()
         self._busy = False
         self.mobile_server = None
+        self.sync_manager = SyncManager(self.catalog, default_inbox())
 
     def send(self, payload: dict) -> None:
         with self._send_lock:
@@ -84,7 +86,8 @@ class Worker:
                 return
             if action == "start_mobile":
                 if self.mobile_server is None:
-                    self.mobile_server = MobileServer(self.catalog, port=int(params.get("port", 8787)))
+                    self.mobile_server = MobileServer(self.catalog, port=int(params.get("port", 8787)),
+                                                      sync_manager=self.sync_manager)
                     self.mobile_server.start()
                 data = {"port": self.mobile_server.port, "pairing_token": self.mobile_server.token,
                         "url": f"http://127.0.0.1:{self.mobile_server.port}",
@@ -94,6 +97,14 @@ class Worker:
                     self.mobile_server.close()
                     self.mobile_server = None
                 data = {"stopped": True}
+            elif action == "sync_dashboard":
+                data = self.sync_manager.dashboard()
+                data["server_running"] = self.mobile_server is not None
+                data["server_port"] = self.mobile_server.port if self.mobile_server else None
+            elif action == "sync_pause":
+                data = self.sync_manager.set_paused(bool(params.get("paused", True)))
+            elif action == "sync_revoke_device":
+                data = self.sync_manager.revoke_device(params["device_id"])
             elif action == "add_folder":
                 data = self.catalog.add_folder(params["path"])
             elif action == "folders":

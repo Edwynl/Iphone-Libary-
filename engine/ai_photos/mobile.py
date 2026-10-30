@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import PhotoCatalog
 from .config import SUPPORTED_EXTENSIONS
+from .sync import CHUNK_BYTES, SyncFailure, SyncManager
 
 LOG = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -42,13 +43,15 @@ def _safe_name(value: str) -> str:
 
 class MobileServer:
     def __init__(self, catalog: PhotoCatalog, *, inbox: Path | None = None,
-                 token: str | None = None, host: str = "127.0.0.1", port: int = 8787):
+                 token: str | None = None, host: str = "127.0.0.1", port: int = 8787,
+                 sync_manager: SyncManager | None = None):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("Mobile service must bind to loopback; use Tailscale Serve for remote access")
         self.catalog = catalog
         self.inbox = (inbox or default_inbox()).expanduser().resolve(strict=False)
         if catalog.home.resolve() == self.inbox or catalog.home.resolve() in self.inbox.parents:
             raise ValueError("Import folder must not live inside the internal app data directory")
+        self.sync_manager = sync_manager or SyncManager(catalog, self.inbox)
         self.token = token or secrets.token_urlsafe(32)
         if len(self.token) < 32:
             raise ValueError("Use a strong 32+ character pairing token")
@@ -143,8 +146,89 @@ class MobileServer:
                     return False
                 return True
 
+            def _sync_device(self) -> str | None:
+                auth = self.headers.get("Authorization", "")
+                if not auth.startswith("Bearer "):
+                    self._json(401, {"error": "Device token required"})
+                    return None
+                device = self.server.mobile.sync_manager.authorized_device(auth[7:])
+                if device is None:
+                    self._json(401, {"error": "Device token invalid or revoked"})
+                    return None
+                return device
+
+            def _read_sync_json(self) -> dict:
+                try:
+                    size = int(self.headers.get("Content-Length", "0"))
+                except ValueError as exc:
+                    raise SyncFailure(400, "Invalid Content-Length") from exc
+                if not 0 < size <= 4096:
+                    raise SyncFailure(413, "JSON body must be 1 to 4096 bytes")
+                try:
+                    result = json.loads(self.rfile.read(size))
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise SyncFailure(400, "Invalid JSON") from exc
+                if not isinstance(result, dict):
+                    raise SyncFailure(400, "JSON object required")
+                return result
+
+            def _sync_handle(self, method: str, path: str):
+                manager = self.server.mobile.sync_manager
+                try:
+                    if path == "/api/sync/v1/pair" and method == "POST":
+                        if not self._auth():
+                            return
+                        data = self._read_sync_json()
+                        return self._json(201, manager.pair(data.get("device_id"), data.get("name")))
+                    device = self._sync_device()
+                    if device is None:
+                        return
+                    if path == "/api/sync/v1/status" and method == "GET":
+                        manager.mark_seen(device)
+                        return self._json(200, {"device_id": device, "paused": manager.dashboard()["paused"]})
+                    if path == "/api/sync/v1/transfers" and method == "POST":
+                        result = manager.begin(device, self._read_sync_json())
+                        manager.mark_seen(device)
+                        return self._json(200, result)
+                    segments = path.split("/")
+                    if len(segments) >= 6 and segments[:5] == ["", "api", "sync", "v1", "transfers"]:
+                        transfer_id = segments[5]
+                        if len(segments) == 6 and method == "GET":
+                            manager.mark_seen(device)
+                            return self._json(200, manager.status(device, transfer_id))
+                        if len(segments) == 7 and segments[6] == "chunk" and method == "PUT":
+                            try:
+                                length = int(self.headers.get("Content-Length", "0"))
+                                offset = int(self.headers.get("X-Upload-Offset", "-1"))
+                            except ValueError as exc:
+                                raise SyncFailure(400, "Invalid upload length or offset") from exc
+                            if not 0 < length <= CHUNK_BYTES:
+                                raise SyncFailure(413, "Chunk must be 1 to 8 MiB")
+                            data = self.rfile.read(length)
+                            if len(data) != length:
+                                raise SyncFailure(400, "Incomplete chunk body")
+                            response = manager.write_chunk(device, transfer_id, offset, data,
+                                                           self.headers.get("X-Chunk-SHA256", ""))
+                            return self._json(200, response)
+                        if len(segments) == 7 and segments[6] == "complete" and method == "POST":
+                            return self._json(200, manager.complete(device, transfer_id))
+                    return self._json(404, {"error": "Unknown sync endpoint"})
+                except SyncFailure as exc:
+                    return self._json(exc.status, {"error": str(exc), **exc.details})
+                except (OSError, RuntimeError):
+                    LOG.exception("Native sync I/O failure")
+                    return self._json(500, {"error": "Sync storage error; source unchanged"})
+
+            def do_PUT(self):
+                path = urlsplit(self.path).path
+                if path.startswith("/api/sync/v1/"):
+                    return self._sync_handle("PUT", path)
+                return self._json(404, {"error": "Not found"})
+
             def do_GET(self):
                 path = urlsplit(self.path).path
+                if path.startswith("/api/sync/v1/"):
+                    return self._sync_handle("GET", path)
                 if path in {"/", "/app.js", "/app.css"}:
                     name = {"/": "index.html", "/app.js": "app.js", "/app.css": "app.css"}[path]
                     data = files("ai_photos").joinpath("mobile_web", name).read_bytes()
@@ -176,6 +260,8 @@ class MobileServer:
                 return self._json(404, {"error": "Not found"})
 
             def do_POST(self):
+                if urlsplit(self.path).path.startswith("/api/sync/v1/"):
+                    return self._sync_handle("POST", urlsplit(self.path).path)
                 if urlsplit(self.path).path != "/api/upload":
                     return self._json(404, {"error": "Not found"})
                 if not self._auth():

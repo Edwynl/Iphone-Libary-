@@ -1,0 +1,3 @@
+-r requirements-core.txt
+# Optional Windows HEIC/HEIF previews. Originals are preserved even without decoder.
+pillow-heif>=1.1,<2

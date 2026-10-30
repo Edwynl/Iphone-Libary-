@@ -69,7 +69,11 @@
           <Button x:Name="DuplicatesButton" Click="DuplicatesButton_Click"
                   HorizontalAlignment="Stretch" Content="Find duplicates / 查找重复"/>
           <Button x:Name="MobileButton" Click="MobileButton_Click"
-                  HorizontalAlignment="Stretch" Content="iPhone sync / 手机同步"/>
+                  HorizontalAlignment="Stretch" Content="Enable iPhone pairing / 开启同步"/>
+          <Button x:Name="ManageSyncButton" Click="ManageSyncButton_Click"
+                  HorizontalAlignment="Stretch" Content="Manage sync / 设备与传输"/>
+          <TextBlock x:Name="SyncStatusText" FontSize="11" Opacity="0.7"
+                     TextWrapping="Wrap" Text="iPhone sync: Checking..."/>
           <Button x:Name="BackupButton" Click="BackupButton_Click"
                   HorizontalAlignment="Stretch" Content="Back up to drive / 本地备份"/>
           <Button x:Name="CloudButton" Click="CloudButton_Click"

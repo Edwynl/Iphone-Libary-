@@ -162,3 +162,22 @@ does not request or write your cloud secrets. S3 uploads use HTTPS transport,
 **not end-to-end client-side encryption**; configure bucket-level encryption,
 versioning, recovery tests, and independent backup copies before relying on it.
 There is **no restore UI or verified disaster-recovery procedure** yet.
+
+
+## Phase 2: native iPhone automatic backup (development)
+
+The **iOS Photos Companion** SwiftUI source is in `ios/PhotosCompanion/` (XcodeGen
+project). It exports HEIC, Live Photo HEIC + paired MOV, ProRAW DNG and full
+video resources through PhotoKit, then submits resumable SHA-256-verified 8 MiB
+chunks over private HTTPS (Tailscale Serve). Windows now offers a Sync Management
+dialog: device pairing, progress, pause/resume, stop server and per-device revoke.
+The first large backup should run in the foreground; background processing
+is opportunistic, **not an always-on real-time sync**. No source photos deleted.
+
+Read [`docs/PHASE2_NATIVE_SYNC.md`](docs/PHASE2_NATIVE_SYNC.md) for architecture,
+protocol, Mac/iOS build steps, security requirements and acceptance gates.
+
+Run on a **Mac with Xcode + XcodeGen**: `bash scripts/build-ios.sh`. There is
+not yet a verified iPhone build, Apple TestFlight distribution, or a signed
+Windows executable. Tests currently exercise the Windows sync protocol only.
+Install `pip install -r engine/requirements-heic.txt` for optional HEIC previews.

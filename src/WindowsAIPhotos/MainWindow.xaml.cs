@@ -43,6 +43,7 @@ public sealed partial class MainWindow : Window
             await RefreshStatusAsync();
             await RefreshFoldersAsync();
             await BrowseAsync(reset: true);
+            await RefreshSyncSidebarAsync();
         }
         catch (Exception ex) { ShowError("Cannot start local engine", ex); }
     }
@@ -154,6 +155,7 @@ public sealed partial class MainWindow : Window
         DuplicatesButton.IsEnabled = !busy;
         OrganizeButton.IsEnabled = !busy;
         MobileButton.IsEnabled = !busy;
+        ManageSyncButton.IsEnabled = !busy;
         BackupButton.IsEnabled = !busy;
         CloudButton.IsEnabled = !busy;
     }
@@ -304,7 +306,8 @@ public sealed partial class MainWindow : Window
                 "Open the private HTTPS URL shown by Tailscale Serve on your iPhone." +
                 Environment.NewLine + Environment.NewLine +
                 "Pairing token (keep private): " + token + Environment.NewLine + Environment.NewLine +
-                "Upload is manual from iPhone Safari in this MVP. Automatic iOS background sync requires a native companion app.");
+                "Install the iOS Photos Companion project on the iPhone, enter the private HTTPS URL and pairing token, then enable automatic sync. iOS schedules background opportunities; this is not real-time continuous sync.");
+            await RefreshSyncSidebarAsync();
         }
         catch (Exception ex) { ShowError("Cannot enable iPhone companion", ex); }
     }

@@ -63,3 +63,16 @@ $env:PYTHONPATH = (Resolve-Path .\engine).Path
 ## 给 Claude Code 的开发任务
 
 请先审核 `docs/ACCEPTANCE.md`：优先完成 Windows x64 构建、真实 SigLIP 2 编码输出验证、文件夹选择和显示测试；不要跳过测试就发布 EXE。然后再处理 5 万张照片的性能测试、安装器、Windows ML/ONNX 模型打包、中文搜索准确率及 HEIC/RAW 支持。
+
+
+## 第二阶段：iPhone 原生自动备份（开发预览）
+
+- `ios/PhotosCompanion/`：SwiftUI + PhotoKit 原生 iPhone 项目（需要 Mac、Xcode 和 XcodeGen 编译）。
+- 原画质导出：HEIC / Live Photos 的静态照片及配对 MOV / DNG / 视频，不主动转码。
+- 8 MiB 分块、SHA-256 校验和 Windows 端持久化偏移量，掉线后按确认偏移恢复。
+- Windows Sync Management：配对、每台设备撤销授权、暂停/恢复、停止服务、查看任务进度。
+- 默认不启用远程同步；iPhone 自动同步需用户明确开启。建议 Tailscale Serve 私有 HTTPS。
+- iOS 后台任务由系统调度，不能保证实时或固定时间；手动强制退出 App 后不能期待它自动启动。
+
+⚠️ 目前通过的是 Windows Python 协议测试及 Swift 语法检查，**尚未在 Xcode 和真实 iPhone 编译及验证**。
+请先阅读 [`docs/PHASE2_NATIVE_SYNC.md`](docs/PHASE2_NATIVE_SYNC.md)，不要把它当成已发布软件。
