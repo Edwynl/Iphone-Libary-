@@ -19,6 +19,59 @@ struct ExportedPhotoResource {
     let sha256: String
 }
 
+/// PhotoKit supplies changes on its own queue. Keep the fetch result behind a
+/// lock; only primitive metadata crosses into the persistent queue actor.
+final class PhotoLibraryTracker: NSObject, PHPhotoLibraryChangeObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: PHFetchResult<PHAsset>?
+    private var dirty = true
+
+    override init() {
+        super.init()
+        PHPhotoLibrary.shared().register(self)
+    }
+    deinit { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+    func photoLibraryDidChange(_ changeInstance: PHChange) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let result, let details = changeInstance.changeDetails(for: result) {
+            self.result = details.fetchResultAfterChanges
+            dirty = true
+        } else if result == nil { dirty = true }
+    }
+    private func snapshot() -> PHFetchResult<PHAsset>? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard dirty else { return nil }
+        // Refresh also reconciles selected-library permission changes.
+        result = PhotoSource.allAssets()
+        dirty = false
+        return result
+    }
+    func reconcile(queue: AssetSyncQueue, receiver: String) async throws -> Int? {
+        // Scanning 100k metadata entries must not block SwiftUI's main actor.
+        let job = Task.detached { [self] () async throws -> Int? in
+            guard let snapshot = self.snapshot() else { return nil }
+            let generation = UUID().uuidString
+            let now = Date().timeIntervalSince1970
+            var batch: [QueueAsset] = []
+            for index in 0..<snapshot.count {
+                try Task.checkCancellation()
+                batch.append(PhotoSource.queueAsset(snapshot.object(at: index)))
+                if batch.count == 500 {
+                    try await queue.discover(batch, receiver: receiver, generation: generation, now: now)
+                    batch.removeAll(keepingCapacity: true)
+                }
+            }
+            try await queue.discover(batch, receiver: receiver, generation: generation, now: now)
+            try Task.checkCancellation()
+            try await queue.finishDiscovery(receiver: receiver, generation: generation)
+            return snapshot.count
+        }
+        return try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
+    }
+}
+
 /// requestData supplies a cancellation ID, unlike writeData's completion-only API.
 private final class ResourceExport: @unchecked Sendable {
     private let lock = NSRecursiveLock()
@@ -83,6 +136,14 @@ private final class ResourceExport: @unchecked Sendable {
 }
 
 enum PhotoSource {
+    static func queueAsset(_ asset: PHAsset) -> QueueAsset {
+        let version = [String(asset.modificationDate?.timeIntervalSince1970 ?? 0),
+            String(asset.creationDate?.timeIntervalSince1970 ?? 0), String(asset.mediaType.rawValue),
+            String(asset.mediaSubtypes.rawValue), String(asset.pixelWidth), String(asset.pixelHeight),
+            String(asset.duration)].joined(separator: "::")
+        return QueueAsset(identifier: asset.localIdentifier, version: version,
+                          changedAt: asset.modificationDate?.timeIntervalSince1970 ?? asset.creationDate?.timeIntervalSince1970 ?? 0)
+    }
     static func requestReadAccess() async -> PHAuthorizationStatus {
         await PHPhotoLibrary.requestAuthorization(for: .readWrite)
     }

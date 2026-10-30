@@ -8,7 +8,6 @@ import UIKit
 final class SyncState: ObservableObject {
     static let shared = SyncState()
     private let settings = UserDefaults.standard
-    private let cursorKey = "photoScanCursor"
     private let deviceIdKey = "deviceIdentifier"
 
     @Published var serverURL: String {
@@ -21,8 +20,8 @@ final class SyncState: ObservableObject {
     @Published var automatic: Bool {
         didSet {
             settings.set(automatic, forKey: "automatic")
-            if automatic { BackgroundScheduler.schedule() }
-            else { BackgroundScheduler.cancel(); automaticTask?.cancel() }
+            if automatic { scheduleBackground() }
+            else { BackgroundScheduler.cancel(); automaticTask?.cancel(); schedulingError = "" }
         }
     }
     @Published var wifiOnly: Bool {
@@ -38,10 +37,12 @@ final class SyncState: ObservableObject {
     @Published private(set) var totalAssets = 0
     @Published private(set) var progress = "Not synced yet"
     @Published private(set) var lastError = ""
+    @Published private(set) var schedulingError = ""
     @Published private(set) var lastCompleted: Date?
 
     let deviceId: String
     private var checkpoint: CheckpointStore?
+    private var assetQueue: AssetSyncQueue?
     private var operationTask: Task<Bool, Never>?
     private var automaticTask: Task<Bool, Never>?
 
@@ -54,7 +55,7 @@ final class SyncState: ObservableObject {
         if persistedId == nil { settings.set(deviceId, forKey: deviceIdKey) }
         isPaired = KeychainStore.loadToken() != nil && settings.string(forKey: "pairedServerURL") != nil && settings.string(forKey: "receiverID") != nil
         lastCompleted = settings.object(forKey: "lastCompleted") as? Date
-        do { checkpoint = try CheckpointStore() }
+        do { checkpoint = try CheckpointStore(); assetQueue = try AssetSyncQueue() }
         catch { lastError = "Cannot open local sync checkpoints: \(error.localizedDescription)" }
     }
 
@@ -67,12 +68,16 @@ final class SyncState: ObservableObject {
             try KeychainStore.saveToken(reply.device_token)
             settings.set(client.origin, forKey: "pairedServerURL")
             settings.set(reply.receiver_id, forKey: "receiverID")
-            settings.set(0, forKey: cursorKey)
             isPaired = true
             lastError = ""
             progress = "Paired successfully. You can start original-quality sync."
-            if automatic { BackgroundScheduler.schedule() }
+            if automatic { scheduleBackground() }
         } catch { lastError = error.localizedDescription }
+    }
+
+    func scheduleBackground() {
+        do { try BackgroundScheduler.schedule(); schedulingError = "" }
+        catch { schedulingError = "Background scheduling failed: \(error.localizedDescription). Open the app to sync and retry the automatic-sync toggle." }
     }
 
     func disconnect() {
@@ -110,7 +115,7 @@ final class SyncState: ObservableObject {
             try Task.checkCancellation()
             guard isPaired, let token = KeychainStore.loadToken(),
                   let receiver = settings.string(forKey: "receiverID") else { throw SyncAPIError.notPaired }
-            guard let checkpoint else { throw CocoaError(.fileReadUnknown) }
+            guard let checkpoint, let assetQueue else { throw CocoaError(.fileReadUnknown) }
             let client = try SyncAPI(serverURL: serverURL, wifiOnly: wifiOnly)
             guard client.origin == settings.string(forKey: "pairedServerURL") else { throw SyncAPIError.notPaired }
             if wifiOnly {
@@ -127,16 +132,40 @@ final class SyncState: ObservableObject {
             }
             try await BackgroundChunkUploader.shared.waitForPreviousTasks()
             try PhotoSource.cleanAbandonedExports()
-            let assets = PhotoSource.allAssets()
-            totalAssets = assets.count
-            if totalAssets == 0 { progress = "No accessible photos or videos"; return true }
-            var index = settings.integer(forKey: cursorKey)
-            if index >= totalAssets || index < 0 { index = 0 }
-            let stop = maxAssets >= totalAssets - index ? totalAssets : index + maxAssets
-            while index < stop {
+            let tracker = PhotoLibraryTracker()
+            let passStarted = Date().timeIntervalSince1970
+            var jobs: [QueueAsset] = []
+            var passHadFailure = false
+            while processedAssets < maxAssets {
                 try Task.checkCancellation()
-                let asset = assets.object(at: index)
+                if let count = try await tracker.reconcile(queue: assetQueue, receiver: receiver) {
+                    totalAssets = count
+                    jobs.removeAll() // Re-select new/changed assets ahead of the backlog.
+                }
+                if jobs.isEmpty {
+                    jobs = try await assetQueue.next(receiver: receiver, passStarted: passStarted,
+                                                     limit: min(20, maxAssets - processedAssets))
+                }
+                guard !jobs.isEmpty else { break }
+                let job = jobs.removeFirst()
+                let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [job.identifier], options: nil)
+                guard let asset = fetched.firstObject else {
+                    // It may have been removed from the selected library. Never delete
+                    // an original or mark the asset backed up merely because it vanished.
+                    try await assetQueue.fail(job, receiver: receiver, now: Date().timeIntervalSince1970)
+                    passHadFailure = true
+                    processedAssets += 1
+                    continue
+                }
+                guard PhotoSource.queueAsset(asset).version == job.version else {
+                    // A change notification may still be in flight. Retry next pass.
+                    try await assetQueue.fail(job, receiver: receiver, now: Date().timeIntervalSince1970)
+                    passHadFailure = true
+                    processedAssets += 1
+                    continue
+                }
                 let resources = PhotoSource.resourceList(for: asset)
+                var assetSucceeded = !resources.isEmpty
                 let unhandledKey = asset.localIdentifier + "::unhandled"
                 if resources.isEmpty {
                     try checkpoint.recordFailure(unhandledKey, receiver: receiver, message: "No supported original resources found")
@@ -156,11 +185,11 @@ final class SyncState: ObservableObject {
                             let available = await WiFiAvailability.isConnected()
                             if !available { throw URLError(.notConnectedToInternet) }
                         }
-                        progress = "Exporting \(resource.filename) (\(index + 1)/\(totalAssets))"
+                        progress = "Exporting \(resource.filename) (checked \(processedAssets)/\(totalAssets))"
                         let exported = try await PhotoSource.export(resource, wifiOnly: wifiOnly)
                         defer { try? FileManager.default.removeItem(at: exported.fileURL) }
                         try Task.checkCancellation()
-                        progress = "Uploading \(resource.filename) (\(index + 1)/\(totalAssets))"
+                        progress = "Uploading \(resource.filename) (checked \(processedAssets)/\(totalAssets))"
                         try await client.upload(resource, exported: exported, deviceToken: token)
                         try checkpoint.markCompleted(resource.failureKey, receiver: receiver, version: resource.assetKey, exported: exported)
                         uploadedResources += 1
@@ -176,22 +205,26 @@ final class SyncState: ObservableObject {
                         }
                         try checkpoint.recordFailure(resource.failureKey, receiver: receiver, message: error.localizedDescription)
                         lastError = "Unresolved resource: \(resource.filename): \(error.localizedDescription)"
-                        // Continue other assets. A wraparound pass retries failed resources.
+                        assetSucceeded = false
                     }
                 }
-                index += 1
                 processedAssets += 1
-                settings.set(index, forKey: cursorKey)
+                if assetSucceeded {
+                    try await assetQueue.complete(job, receiver: receiver, now: Date().timeIntervalSince1970)
+                } else {
+                    try await assetQueue.fail(job, receiver: receiver, now: Date().timeIntervalSince1970)
+                    passHadFailure = true
+                }
             }
-            let reachedEnd = index == totalAssets
-            if reachedEnd { settings.set(0, forKey: cursorKey) }
-            let failures = try checkpoint.failureCount(receiver: receiver)
-            if reachedEnd && failures == 0 {
+            let remaining = try await assetQueue.remaining(receiver: receiver)
+            if remaining == 0 {
                 lastCompleted = Date()
                 settings.set(lastCompleted, forKey: "lastCompleted")
             }
-            progress = "Checked \(processedAssets) assets; sent \(uploadedResources) originals; \(failures) unresolved."
-            return failures == 0
+            progress = "Checked \(processedAssets) assets; sent \(uploadedResources) originals; \(remaining) pending or failed."
+            // Reaching this opportunity's budget is normal progress, not a failed
+            // BGProcessingTask. Only the full snapshot updates lastCompleted.
+            return !passHadFailure
         } catch {
             lastError = error.localizedDescription
             progress = Task.isCancelled ? "Sync cancelled safely; committed chunks remain resumable." : "Pass interrupted; reconnect and retry."

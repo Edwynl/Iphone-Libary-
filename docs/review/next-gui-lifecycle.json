@@ -1,0 +1,16 @@
+{
+  "method": "Native WinUI interaction via cua_repl; isolated next-gui-temp state and imports",
+  "initial_receiver_off": true,
+  "enabled_through_pairing_button": true,
+  "persistence_and_stop_explained_in_dialog": true,
+  "normal_main_window_close": true,
+  "original_app_and_worker_pids_exited": true,
+  "receiver_still_running_after_window_close": true,
+  "reopened_app_shows_listening": true,
+  "manage_sync_attached_to_existing_receiver": true,
+  "stop_receiver_clicked_in_ui": true,
+  "management_shows_server_off_and_stop_disabled": true,
+  "receiver_and_launcher_pids_exited_after_stop": true,
+  "real_media_or_tailscale_configuration_used": false,
+  "limitations": "Current-login process lifecycle only. Windows logout/reboot, installer, real iPhone and Tailscale were not tested. No automatic startup is implemented."
+}

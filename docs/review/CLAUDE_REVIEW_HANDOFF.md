@@ -1,5 +1,20 @@
 # Claude review handoff
 
+## Follow-up after independent review on PR #2
+
+Read [FOLLOWUP_REVIEW_FIXES.md](FOLLOWUP_REVIEW_FIXES.md) first for the current
+delta: stable iPhone asset queue, independent opt-in Windows receiver,
+bounded HTTP admission/inactivity, and visible BGTask scheduling failures.
+The counts below document the earlier repair commit, not the latest test run.
+The follow-up report links the current logs and clearly separates local SQL
+contract tests from **Not Verified** Swift/Xcode/PhotoKit/device behavior.
+
+Focus on `AssetSyncQueue.swift`, `PhotoLibraryTracker` in `PhotoSource.swift`,
+`SyncState.swift`, `receiver_agent.py`, and lifecycle/management races. Confirm
+new imports with old dates outrank backlog, retries/audits get reserved slots,
+partial discovery cannot claim completion, two starters cannot create two agents,
+UI close does not kill the receiver, and explicit Stop cannot delete originals.
+
 This PR contains review fixes on top of PR #2 (`feat/iphone-native-resumable-sync`, baseline `c6408c1d2220241e555aa450839b553998ea1bd2`). It is stacked: review and merge order remains PR #1 → PR #2 → this repair PR. No existing PR branch is rewritten by this change.
 
 Read [FIX_VALIDATION.md](FIX_VALIDATION.md) for the 26-issue implementation/validation matrix and [FULL_CODE_REVIEW.md](FULL_CODE_REVIEW.md) for the historical findings. Those reports describe the state before this publishing step; their local paths and uncommitted-branch statements are historical snapshots. The GitHub diff and current commit are authoritative for this review.

@@ -20,7 +20,7 @@ enum BackgroundScheduler {
                     completion.finish(false)
                     return
                 }
-                schedule() // A later opportunity survives expiration of this pass.
+                SyncState.shared.scheduleBackground() // Surface rejected scheduling to the user.
                 let success = await SyncState.shared.automaticPass(maxAssets: 20)
                 completion.finish(success)
             }
@@ -32,12 +32,12 @@ enum BackgroundScheduler {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
     }
 
-    static func schedule() {
+    static func schedule() throws {
         let request = BGProcessingTaskRequest(identifier: identifier)
         request.requiresNetworkConnectivity = true
         request.requiresExternalPower = false
         request.earliestBeginDate = Date(timeIntervalSinceNow: 60 * 30)
-        try? BGTaskScheduler.shared.submit(request)
+        try BGTaskScheduler.shared.submit(request)
     }
 }
 

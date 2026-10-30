@@ -13,6 +13,10 @@ concurrency-data/
 junction-data/
 backup-junction-data/
 fix-*-temp*/
+next-*-temp*/
+next-agent-tests.log
+next-contract-tests.log
+next-restart-tests.log
 fix-test-state/
 fix-gui-state/
 fix-large-transfer-data/

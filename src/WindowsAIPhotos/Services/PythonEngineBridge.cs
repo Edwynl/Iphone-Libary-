@@ -147,7 +147,9 @@ public sealed class PythonEngineBridge : IDisposable
         _disposed = true;
         try
         {
-            if (_process is { HasExited: false }) _process.Kill(entireProcessTree: true);
+            // The explicitly enabled receiver is a detached process with its own
+            // stop control. Closing this window only stops the stdio worker.
+            if (_process is { HasExited: false }) _process.Kill(entireProcessTree: false);
         }
         catch (Exception) { }
         _process?.Dispose();

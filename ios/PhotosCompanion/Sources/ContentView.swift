@@ -46,6 +46,10 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text("iOS schedules background opportunities; syncing may pause while the app is closed. Force quitting disables automatic relaunch. Open this app to complete an initial large library transfer.")
                         .font(.caption).foregroundStyle(.secondary)
+                    if !sync.schedulingError.isEmpty {
+                        Text(sync.schedulingError).font(.footnote).foregroundStyle(.red)
+                            .accessibilityIdentifier("background-scheduling-error")
+                    }
                 }
 
                 Section("Sync progress") {

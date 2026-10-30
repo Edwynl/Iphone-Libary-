@@ -1,0 +1,41 @@
+{
+  "pytest_passed": 73,
+  "pytest_skipped": 1,
+  "pytest_failed": 0,
+  "pytest_errors": 0,
+  "pytest_seconds": 40.365,
+  "sqlite_100000_metadata_two_snapshots_seconds": 0.748,
+  "metadata_scope": "In-memory SQLite using SQL extracted from Swift; not PhotoKit or native Swift performance",
+  "swift_grammar_files": 13,
+  "swift_xcode_native_tests": "Not Verified",
+  "windows_build_warnings": 0,
+  "windows_build_errors": 0,
+  "output_files_byte_verified": [
+    "ai_photos/__init__.py",
+    "ai_photos/__main__.py",
+    "ai_photos/backup.py",
+    "ai_photos/catalog.py",
+    "ai_photos/cli.py",
+    "ai_photos/config.py",
+    "ai_photos/duplicates.py",
+    "ai_photos/file_safety.py",
+    "ai_photos/mobile.py",
+    "ai_photos/mobile_web/app.css",
+    "ai_photos/mobile_web/app.js",
+    "ai_photos/mobile_web/index.html",
+    "ai_photos/organize.py",
+    "ai_photos/receiver_agent.py",
+    "ai_photos/semantic.py",
+    "ai_photos/sync.py",
+    "ai_photos/worker.py"
+  ],
+  "evidence_sha256": {
+    "next-pytest.xml": "4075a1c0fab00088e007a49328f1e2d37870a5687b0503a0fd9446eaf1deff30",
+    "next-pytest.log": "f3fb11767c9eea052d5e2c7a54445ef4ac6261455ec38d481bb9d5283f6e2f4f",
+    "next-dotnet-build.log": "7312da7c7deaf7d8f3486cc02f2f5421cc83b5da6a917877b58e69afe17995fe",
+    "next-output-smoke.log": "48cee669ebff41855fff67705a53d0ae67d696303478552459e0dd0b54183efe",
+    "next-swift-syntax.json": "09dd1ff9b4930307761d269c38c1d9d333119f73b615654dc456600f97c566b9",
+    "next-gui-lifecycle.json": "4d124e47b6638323e7f16ae807cb3df5b779d6100c61f03782df0bc7ecdd81d6",
+    "next-static-check.log": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+  }
+}

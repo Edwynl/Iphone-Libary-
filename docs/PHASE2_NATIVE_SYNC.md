@@ -6,17 +6,18 @@ Status: **development implementation / Draft PR**, not a signed TestFlight app o
 
 1. iOS `PHAsset.fetchAssets` scans local Photos metadata. Users must approve Photos permissions; Limited Photos selection backs up only the selected items.
 2. `PHAssetResource.assetResources` picks **original HEIC/JPEG/ProRAW DNG** still resources, **original videos**, and the **paired MOV** for Live Photos. No recompression. The two Live Photo resources share the same `PHAsset.localIdentifier` on Windows.
-3. `PHAssetResourceManager.writeData` exports each resource to the iPhone app's private Application Support directory. iCloud-only resources may need iCloud download.
+3. Cancellable `PHAssetResourceManager.requestData` exports each resource to the iPhone app's private Application Support directory. Strict Wi-Fi mode reads local originals only; PhotoKit has no per-request cellular prohibition. For iCloud-only originals, download in Photos first or explicitly allow system network retrieval by disabling Wi-Fi-only mode.
 4. The iPhone calculates whole-file SHA-256 and sends transfer metadata to the paired Windows server over Tailscale Serve **HTTPS**.
 5. Windows returns an idempotent transfer ID and durable byte offset. Files are sent in at most **8 MiB chunks** using iOS file-backed background `URLSessionUploadTask`. Each chunk has `X-Upload-Offset` and `X-Chunk-SHA256`; Windows fsyncs the chunk **before acknowledging it**.
 6. On reconnection/relaunch, the iPhone re-initiates the resource and resumes from Windows' acknowledged offset. Windows copies into a verified destination-volume temporary file, then atomically publishes content-addressed bytes under `Pictures/Windows AI Photos Imports/<sha-prefix>/`. Staging remains until the completed DB commit, so cross-volume storage and interrupted finalization can recover. A corrupt old import is retained and recovery uses a new path.
 7. The iPhone checkpoints SHA-256/size under a receiver ID and checks Windows' actual file integrity before skipping a resource. The management dialog refreshes every three seconds, with pause/resume, stop, device revoke and explicit incomplete-staging discard. Confirmation actions suspend automatic row replacement.
+8. A receiver-scoped SQLite queue uses stable PhotoKit IDs and metadata versions. Each opportunity discovers metadata in batches of 500 off the main actor. Newly discovered/changed assets precede the old backlog even when their EXIF dates are old. Of each 20-job batch, up to one slot retries a due failure and one audits a previously completed asset. PhotoKit changes trigger reconciliation before the next asset. Audits are eligible after 24 hours, **not guaranteed to run every 24 hours**; actual latency depends on backlog, foreground use and iOS scheduling. Selected-library removal only changes queue eligibility, never deletes originals.
 
 ## Trust model & security
 
 - No public inbound port. Windows binds `127.0.0.1:8787`; use `tailscale serve --bg 8787`. iPhone requires a `https://...ts.net` address and Tailscale installed/signed in.
 - Windows exposes a **master pairing code** via "Enable iPhone pairing". This is reusable root pairing authority for the service session, not a one-time code; keep it private. Devices receive separate credentials stored in iPhone Keychain; Windows stores their SHA-256 digests. A holder of the master code can pair again after a device revoke. Short-lived pairing windows remain a hardening gate.
-- Sync is opt-in, **disabled at startup** until explicitly enabled from Windows; background syncing on iPhone is off by default until the user toggles it.
+- Sync is opt-in, **off until explicitly enabled** from Windows; background syncing on iPhone is off by default until the user toggles it. Once enabled, an independent receiver survives WinUI close. Reopening WinUI attaches to the same receiver. Stop it in Manage sync. It does not automatically start after sign-out or reboot; re-enable it to resume durable transfers.
 - Windows can pause syncing while allowing metadata/status endpoints; revoked tokens cannot resume existing jobs. Staging remains local and no original photos on the iPhone or Windows are deleted.
 - Filenames are sanitized; server refuses traversal, oversized JSON/chunks, unknown extensions, unauthenticated uploads, wrong offsets, cross-device job access, SHA-256 mismatches.
 - The HTTP server is designed for **personal Tailnet use**, not internet hosting. A production release requires independent security review, quotas, recoverability, traffic testing and audit logging.
@@ -37,7 +38,7 @@ Select an Apple Development Team in Xcode signing; build to a **real iPhone** fo
 
 ## Windows setup
 
-Run Windows AI Photos in dev mode; click "Enable iPhone pairing" and keep the local worker running. From an administrator/user PowerShell with Tailscale installed:
+Run Windows AI Photos in dev mode; click "Enable iPhone pairing". The independent receiver continues after the window closes; the dialog explains how to stop it. From an administrator/user PowerShell with Tailscale installed:
 
 ```powershell
 tailscale serve --bg 8787
@@ -47,6 +48,18 @@ tailscale serve status
 Open `https://<your-device>.<your-tailnet>.ts.net` on your iPhone (with Tailscale active), then enter that URL and the master pairing code in Photos Companion; pair once. Enable Automatic Backup and choose Wi-Fi only (default).
 
 **Do not** use `tailscale funnel`; `funnel` makes the service public. Do not open port 8787 on your router.
+
+CLI management from `engine/`, using the same Python environment and `AI_PHOTOS_HOME` as the app:
+
+```powershell
+python -m ai_photos.cli receiver-start --port 8787
+python -m ai_photos.cli receiver-status
+python -m ai_photos.cli receiver-stop
+```
+
+`receiver-status` does not start a receiver. The existing `serve-iphone` command remains a foreground server. Ports 8765 and 8766 are refused. No service installation, scheduled task, registry startup entry, firewall rule or Tailscale configuration is applied by these commands. Stop drains admitted requests; long disk work may report stop pending before it finishes.
+
+Management uses authenticated JSON over a remote-rejecting Windows named pipe; its control secret is DPAPI-encrypted for the current Windows user. It is separate from the loopback media HTTP listener and is never forwarded through Tailscale. A per-data-directory OS lease prevents two managed receivers. A new receiver process rotates the root pairing code; existing device credentials and acknowledged offsets remain in SQLite. The HTTP server admits at most 16 connections, uses a 15-second inactivity timeout, and returns retryable HTTP 503 when saturated. Existing per-device pending-transfer and disk-reserve checks remain; this is not a full hostile-client rate limiter.
 
 ## API v1 contract
 

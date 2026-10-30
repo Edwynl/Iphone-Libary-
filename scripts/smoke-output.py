@@ -3,10 +3,10 @@ import argparse
 import http.client
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument('engine', type=Path)
@@ -16,7 +16,8 @@ engine = args.engine.resolve(strict=True)
 for name in ('index.html', 'app.js', 'app.css'):
     assert (engine / 'ai_photos/mobile_web' / name).is_file(), name
 with tempfile.TemporaryDirectory(dir=args.state_dir) as state:
-    env = dict(os.environ, AI_PHOTOS_HOME=state, PYTHONPATH=str(engine), PYTHONIOENCODING='utf-8')
+    env = dict(os.environ, AI_PHOTOS_HOME=str(Path(state) / 'home'), AI_PHOTOS_INBOX=str(Path(state) / 'imports'),
+               PYTHONPATH=str(engine), PYTHONIOENCODING='utf-8')
     worker = subprocess.Popen([sys.executable, '-u', '-m', 'ai_photos'], cwd=engine, env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
     try:
@@ -44,3 +45,6 @@ with tempfile.TemporaryDirectory(dir=args.state_dir) as state:
         except subprocess.TimeoutExpired:
             worker.kill()
             worker.wait(timeout=10)
+        # Explicit agents outlive workers, including failures in this smoke test.
+        subprocess.run([sys.executable, '-m', 'ai_photos.cli', 'receiver-stop'], cwd=engine,
+                       env=env, check=True, capture_output=True, timeout=15)

@@ -11,6 +11,7 @@ from .duplicates import find_duplicates
 from .backup import backup_local, backup_s3, restore_local
 from .mobile import MobileServer
 from .organize import virtual_albums
+from .receiver_agent import ReceiverController
 
 
 def main(argv=None) -> int:
@@ -47,12 +48,23 @@ def main(argv=None) -> int:
     p = sub.add_parser("serve-iphone", help="Opt-in loopback-only iPhone uploader for Tailscale Serve")
     p.add_argument("--port", type=int, default=8787)
     p.add_argument("--inbox")
+    p = sub.add_parser('receiver-start', help='Explicitly start the independent background receiver for this login session')
+    p.add_argument('--port', type=int, default=8787)
+    p.add_argument('--inbox')
+    sub.add_parser('receiver-status', help='Inspect the background receiver without starting it')
+    sub.add_parser('receiver-stop', help='Stop the background receiver without deleting original imports')
     args = parser.parse_args(argv)
     cat = PhotoCatalog()
     ai = Siglip2Encoder()
     try:
         if args.cmd == "status":
             data = cat.stats(ai.model_id) | {"ai_installed": ai.installed}
+        elif args.cmd == 'receiver-start':
+            data = ReceiverController(cat.home).start(port=args.port, inbox=args.inbox)
+        elif args.cmd == 'receiver-status':
+            data = ReceiverController(cat.home).status()
+        elif args.cmd == 'receiver-stop':
+            data = ReceiverController(cat.home).stop()
         elif args.cmd == "add-folder":
             data = cat.add_folder(args.path)
         elif args.cmd == "folders":

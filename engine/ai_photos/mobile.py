@@ -29,8 +29,45 @@ LOG = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    def __init__(self, *args, max_connections=16, socket_timeout=15, **kwargs):
+        if not 1 <= max_connections <= 128 or not 0 < socket_timeout <= 120:
+            raise ValueError('Invalid receiver connection limits')
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self.socket_timeout = socket_timeout
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self.socket_timeout)
+        return request, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            body = b'{"error":"Receiver busy; retry later","retryable":true}'
+            try:
+                request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: '
+                                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def default_inbox() -> Path:
-    return Path.home() / "Pictures" / "Windows AI Photos Imports"
+    override = os.environ.get('AI_PHOTOS_INBOX')
+    return Path(override).expanduser() if override else Path.home() / "Pictures" / "Windows AI Photos Imports"
 
 
 def _safe_name(value: str) -> str:
@@ -47,9 +84,11 @@ def _safe_name(value: str) -> str:
 class MobileServer:
     def __init__(self, catalog: PhotoCatalog, *, inbox: Path | None = None,
                  token: str | None = None, host: str = "127.0.0.1", port: int = 8787,
-                 sync_manager: SyncManager | None = None):
+                 sync_manager: SyncManager | None = None, max_connections=16, socket_timeout=15):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("Mobile service must bind to loopback; use Tailscale Serve for remote access")
+        if port in {8765, 8766}:
+            raise ValueError('Protected ports cannot host a photo receiver')
         self.catalog = catalog
         self.inbox = (inbox or default_inbox()).expanduser().resolve(strict=False)
         if catalog.home.resolve() == self.inbox or catalog.home.resolve() in self.inbox.parents:
@@ -58,8 +97,10 @@ class MobileServer:
         self.token = token or secrets.token_urlsafe(32)
         if len(self.token) < 32:
             raise ValueError("Use a strong 32+ character pairing token")
-        self.httpd = ThreadingHTTPServer((host, port), self._handler_class())
-        self.httpd.daemon_threads = True
+        self.httpd = BoundedHTTPServer((host, port), self._handler_class(),
+                                      max_connections=max_connections, socket_timeout=socket_timeout)
+        # Explicit Stop drains admitted writes before the receiver process exits.
+        self.httpd.daemon_threads = False
         self.httpd.mobile = self  # type: ignore[attr-defined]
         self.thread = None
 
@@ -74,7 +115,8 @@ class MobileServer:
         self.thread.start()
 
     def close(self):
-        self.httpd.shutdown()
+        if self.thread:
+            self.httpd.shutdown()
         self.httpd.server_close()
         if self.thread:
             self.thread.join(timeout=5)

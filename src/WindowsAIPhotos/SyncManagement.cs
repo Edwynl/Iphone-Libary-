@@ -56,7 +56,7 @@ public sealed partial class MainWindow
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var refreshButton = new Button { Content = "Refresh" };
         var pauseButton = new Button { Content = "Pause" };
-        var stopButton = new Button { Content = "Stop server" };
+        var stopButton = new Button { Content = "Stop receiver" };
         controls.Children.Add(refreshButton);
         controls.Children.Add(pauseButton);
         controls.Children.Add(stopButton);
@@ -84,6 +84,9 @@ public sealed partial class MainWindow
                     ? $"Listening locally on 127.0.0.1:{data.GetProperty("server_port").GetInt32()}" +
                       " · Tailscale Serve HTTPS required for iPhone"
                     : "Server off — use Enable iPhone pairing to start"));
+                if (serverRunning) details.Children.Add(SyncLine("Background receiver stays active after this window closes. Stop receiver ends it; there is no automatic start after sign-out/reboot."));
+                if (data.TryGetProperty("receiver_error", out var receiverError) && receiverError.ValueKind == JsonValueKind.String)
+                    warning.Text = "Receiver status unavailable: " + receiverError.GetString();
                 details.Children.Add(SyncLine($"Completed: {totals.GetProperty("completed").GetInt32():N0} resources" +
                     $" · Incomplete: {totals.GetProperty("pending").GetInt32():N0}" +
                     $" · Received: {FormatBytes(totals.GetProperty("bytes_received").GetInt64())}"));

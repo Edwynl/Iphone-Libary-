@@ -25,6 +25,12 @@ Python Worker (engine/ai_photos/worker.py)
 Indexing reads photo bytes locally using Pillow. The HTTP receiver is off by
 default; explicit `start_mobile` binds loopback only. Remote access requires
 private Tailscale Serve HTTPS, never public port forwarding or Funnel.
+`start_mobile` now launches an independent opt-in receiver. Closing WinUI stops
+the stdio worker; the receiver remains active until explicitly stopped or the
+login session ends. Reopening the app attaches to it. Local management uses a
+DPAPI-authenticated, remote-rejecting Windows named pipe and an OS singleton
+lease per data directory. No automatic startup service is installed. See
+[native sync lifecycle](PHASE2_NATIVE_SYNC.md) for controls and limits.
 An image might be decoded twice on its first scan (thumbnail and embedding).
 Semantic vectors are ~768-1024 floats depending on the actual model config;
 size is validated on read. Exact dimensionality must be verified at runtime.

@@ -42,5 +42,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Stable asset queue unit tests
+        run: swift test --package-path ios/PhotosCompanion
       - name: Unsigned simulator compile
         run: bash scripts/build-ios.sh
