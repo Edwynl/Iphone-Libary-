@@ -1,0 +1,7 @@
+-r requirements-core.txt
+# Installed only when enabling local semantic search (no Ollama required).
+torch>=2.5,<3
+transformers>=4.51,<5
+huggingface-hub>=0.30,<2
+safetensors>=0.5,<1
+sentencepiece>=0.2,<1

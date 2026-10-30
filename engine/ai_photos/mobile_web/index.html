@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows AI Photos - iPhone companion</title><link rel="stylesheet" href="/app.css"></head>
+<body><main><header><span class="eyebrow">PRIVATE LIBRARY</span><h1>Windows AI Photos</h1><p>Upload from your iPhone. Browse your Windows photo collection.</p></header>
+<section id="pair" class="panel"><label for="token">Pairing token from Windows</label><input id="token" type="password" autocomplete="off" placeholder="Paste pairing token"><button id="connect">Connect securely</button><p id="connection" role="status"></p></section>
+<section id="library" hidden><div class="panel"><h2>Upload photos</h2><input type="file" id="files" multiple accept="image/*,.heic,.heif"><button id="upload">Upload selected files</button><p id="progress" role="status">Photos are copied; originals stay on your iPhone.</p></div>
+<div class="library-head"><h2>Recent photos</h2><button id="refresh">Refresh</button></div><div id="grid" class="grid"></div></section>
+<footer>Accessible only when your Windows PC is running. Keep Tailscale connected outside home.</footer></main>
+<script src="/app.js" defer></script></body></html>
