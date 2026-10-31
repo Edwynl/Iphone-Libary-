@@ -6,6 +6,7 @@ expose this development server directly to the public internet.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -17,16 +18,26 @@ import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .catalog import PhotoCatalog
 from .config import SUPPORTED_EXTENSIONS
 from .sync import CHUNK_BYTES, SyncFailure, SyncManager
 from .file_safety import SafeDirectory
+from .media import VIDEO_EXTENSIONS
 from .duplicates import sha256_file
 
 LOG = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+PAGE_SIZE = 60
+# What a signed media link can open: the catalogued original, its Live Photo motion, its thumbnail.
+_MEDIA_COLUMNS = {"original": "path", "motion": "companion", "thumb": "thumb_path"}
+_MEDIA_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".bmp": "image/bmp",
+    ".webp": "image/webp", ".tif": "image/tiff", ".tiff": "image/tiff", ".gif": "image/gif",
+    ".heic": "image/heic", ".heif": "image/heif", ".avif": "image/avif",
+    ".mov": "video/quicktime", ".mp4": "video/mp4", ".m4v": "video/x-m4v",
+}
 
 
 class BoundedHTTPServer(ThreadingHTTPServer):
@@ -76,8 +87,8 @@ def _safe_name(value: str) -> str:
     name = re.sub(r'[<>:"|?*\x00-\x1f]', "_", name).strip(" .")
     stem = Path(name).stem.strip(" .")[:70] or "photo"
     suffix = Path(name).suffix.lower()
-    if suffix not in SUPPORTED_EXTENSIONS:
-        raise ValueError("Unsupported image extension")
+    if suffix not in SUPPORTED_EXTENSIONS | VIDEO_EXTENSIONS:
+        raise ValueError("Unsupported media extension")
     return stem + suffix
 
 
@@ -120,6 +131,30 @@ class MobileServer:
         self.httpd.server_close()
         if self.thread:
             self.thread.join(timeout=5)
+
+    def media_signature(self, photo_id: int, part: str) -> str:
+        return hmac.new(self.token.encode(), f"{photo_id}:{part}".encode(), hashlib.sha256).hexdigest()
+
+    def media_url(self, photo_id: int, part: str) -> str:
+        # <img> and <video> cannot send the Authorization header, so each link carries its own signature.
+        return f"/api/media?id={photo_id}&part={part}&sig={self.media_signature(photo_id, part)}"
+
+    def media_file(self, photo_id: int, part: str) -> Path | None:
+        """The file behind a media link, only if it still lies inside the library (or the thumbnail cache)."""
+        with self.catalog.connection() as db:
+            row = db.execute(f"SELECT {_MEDIA_COLUMNS[part]} FROM photos WHERE id=?", (photo_id,)).fetchone()
+        if not row or not row[0]:
+            return None
+        target = Path(row[0]).resolve()
+        if part == "thumb":
+            roots = [self.catalog.thumbs_dir.resolve()]
+        else:
+            roots = [Path(root).resolve() for root in self.catalog.folders()]
+            if target.suffix.lower() not in _MEDIA_TYPES:
+                return None
+        if not target.is_file() or not any(root in target.parents for root in roots):
+            return None
+        return target
 
     def import_upload(self, source: Path, filename: str, digest: str) -> dict:
         """Move completed upload atomically into an explicit user-visible Pictures folder."""
@@ -172,15 +207,15 @@ class MobileServer:
             def log_message(self, fmt, *args):
                 LOG.info("mobile: " + fmt, *args)
 
-            def _common_headers(self, ctype: str, length: int):
+            def _common_headers(self, ctype: str, length: int, cache: str = "no-store"):
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(length))
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control", cache)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("Content-Security-Policy", "default-src 'none'; "
-                                 "script-src 'self'; style-src 'self'; img-src 'self' blob:; "
+                                 "script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self'; "
                                  "connect-src 'self'; base-uri 'none'; form-action 'none'")
 
             def _send(self, code: int, payload: bytes, ctype="application/json; charset=utf-8"):
@@ -198,6 +233,56 @@ class MobileServer:
                     self._json(401, {"error": "Pairing token required"})
                     return False
                 return True
+
+            def _media(self, query: dict):
+                """Stream an original, Live Photo motion or thumbnail; byte ranges let Safari play video."""
+                service = self.server.mobile
+                try:
+                    photo_id, part, signature = int(query["id"][0]), query["part"][0], query["sig"][0]
+                except (ValueError, KeyError, IndexError):
+                    return self._json(400, {"error": "Invalid media link"})
+                if part not in _MEDIA_COLUMNS or not secrets.compare_digest(
+                        signature, service.media_signature(photo_id, part)):
+                    return self._json(403, {"error": "Invalid media link"})
+                target = service.media_file(photo_id, part)
+                if target is None:
+                    return self._json(404, {"error": "File unavailable"})
+                size = target.stat().st_size
+                start, end, status = 0, size - 1, 200
+                match = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "").strip())
+                if match and (match[1] or match[2]):
+                    if match[1]:
+                        start = int(match[1])
+                        end = min(int(match[2]), size - 1) if match[2] else size - 1
+                    else:
+                        start = max(0, size - int(match[2]))
+                    if start > end:
+                        self.send_response(416)
+                        self.send_header("Content-Range", f"bytes */{size}")
+                        self._common_headers("text/plain", 0)
+                        return self.end_headers()
+                    status = 206
+                self.send_response(status)
+                ctype = "image/jpeg" if part == "thumb" else _MEDIA_TYPES[target.suffix.lower()]
+                self._common_headers(ctype, end - start + 1, cache="private, max-age=86400")
+                self.send_header("Accept-Ranges", "bytes")
+                if status == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                if "download" in query:
+                    self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(target.name))
+                self.end_headers()
+                remaining = end - start + 1
+                try:
+                    with target.open("rb") as f:
+                        f.seek(start)
+                        while remaining:
+                            chunk = f.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    pass  # Safari drops video requests as it seeks.
 
             def _sync_device(self) -> str | None:
                 auth = self.headers.get("Authorization", "")
@@ -304,28 +389,27 @@ class MobileServer:
                     mime = "text/html; charset=utf-8" if path == "/" else (
                         "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8")
                     return self._send(200, data, mime)
+                if path == "/api/media":
+                    return self._media(parse_qs(urlsplit(self.path).query, keep_blank_values=True))
                 if not self._auth():
                     return
                 if path == "/api/photos":
-                    results = self.server.mobile.catalog.browse(limit=60)
-                    safe = [{"id": p["id"], "name": p["name"], "has_thumb": bool(p["thumb_path"])}
-                            for p in results]
-                    return self._json(200, {"photos": safe})
+                    try:
+                        offset = max(0, int(parse_qs(urlsplit(self.path).query).get("offset", ["0"])[0]))
+                    except ValueError:
+                        return self._json(400, {"error": "Invalid offset"})
+                    service = self.server.mobile
+                    # One extra row says whether another page follows.
+                    results = service.catalog.browse(limit=PAGE_SIZE + 1, offset=offset)
+                    page = [{"id": p["id"], "name": p["name"], "video": p["media_kind"] == "video",
+                             "thumb": service.media_url(p["id"], "thumb") if p["thumb_path"] else None,
+                             "original": service.media_url(p["id"], "original"),
+                             "motion": service.media_url(p["id"], "motion") if p["companion"] else None}
+                            for p in results[:PAGE_SIZE]]
+                    more = len(results) > PAGE_SIZE
+                    return self._json(200, {"photos": page, "next_offset": offset + PAGE_SIZE if more else None})
                 if path == "/api/status":
                     return self._json(200, self.server.mobile.catalog.stats())
-                if path == "/api/thumb":
-                    try:
-                        photo_id = int(parse_qs(urlsplit(self.path).query)["id"][0])
-                    except (ValueError, KeyError, IndexError):
-                        return self._json(400, {"error": "Invalid ID"})
-                    with self.server.mobile.catalog.connection() as db:
-                        row = db.execute("SELECT thumb_path FROM photos WHERE id=?", (photo_id,)).fetchone()
-                    if row and row["thumb_path"]:
-                        target = Path(row["thumb_path"]).resolve()
-                        thumbs = self.server.mobile.catalog.thumbs_dir.resolve()
-                        if thumbs in target.parents and target.is_file():
-                            return self._send(200, target.read_bytes(), "image/jpeg")
-                    return self._json(404, {"error": "Thumbnail unavailable"})
                 return self._json(404, {"error": "Not found"})
 
             def do_POST(self):
