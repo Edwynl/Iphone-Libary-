@@ -45,7 +45,10 @@ class SyncManager:
         self.catalog = catalog
         self.inbox = Path(inbox).expanduser().resolve(strict=False)
         self.staging = (catalog.home / "sync-staging").resolve()
+        # Guards short DB/staging mutations only. Whole-file hashing and the
+        # final copy run outside it so one large resource never stalls others.
         self.lock = threading.RLock()
+        self._finalizing = set()
         self._initialize()
 
     def _initialize(self):
@@ -86,6 +89,13 @@ class SyncManager:
         except (OSError, ValueError):
             return False
 
+    def _mark_failed_if_unchanged(self, row):
+        # Only fail the exact completed version that was hashed without the lock.
+        with self.lock, self.catalog.connection() as db:
+            db.execute('''UPDATE sync_transfers SET status='failed',updated_at=?
+                WHERE id=? AND status='complete' AND stored_path IS ?''',
+                (utcnow(), row['id'], row['stored_path']))
+
     def _ensure_device(self, db, device_id):
         active = db.execute('SELECT 1 FROM sync_devices WHERE device_id=? AND revoked_at IS NULL',
                             (device_id,)).fetchone()
@@ -93,15 +103,15 @@ class SyncManager:
             raise SyncFailure(401, 'Device has been revoked; pair again')
 
     def verify(self, device_id, body):
-        with self.lock, self.catalog.connection() as db:
+        with self.catalog.connection() as db:
             self._ensure_device(db, device_id)
             row = db.execute('''SELECT * FROM sync_transfers WHERE device_id=?
                 AND asset_id=? AND resource_type=? AND sha256=?''',
                 (device_id, body.get('asset_id'), body.get('resource_type'), body.get('sha256'))).fetchone()
-            valid = bool(row and row['status'] == 'complete' and self._stored_valid(row))
-            if row and row['status'] == 'complete' and not valid:
-                db.execute("UPDATE sync_transfers SET status='failed',updated_at=? WHERE id=?", (utcnow(), row['id']))
-            return {'complete': valid, 'receiver_id': self.receiver_id}
+        valid = bool(row and row['status'] == 'complete' and self._stored_valid(row))
+        if row and row['status'] == 'complete' and not valid:
+            self._mark_failed_if_unchanged(row)
+        return {'complete': valid, 'receiver_id': self.receiver_id}
 
     @staticmethod
     def _valid_name(filename: str, resource_type: str) -> str:
@@ -191,8 +201,9 @@ class SyncManager:
             return {"paused": self._paused(db), "devices": devices, "totals": dict(total),
                     "recent_transfers": recent, "chunk_bytes": CHUNK_BYTES}
 
-    def _transfer(self, db, transfer_id: str, device_id: str):
-        self._ensure_device(db, device_id)
+    def _transfer(self, db, transfer_id: str, device_id: str, *, require_active=True):
+        if require_active:
+            self._ensure_device(db, device_id)
         if not _ID_PATTERN.fullmatch(transfer_id):
             raise SyncFailure(404, "Transfer not found")
         row = db.execute("SELECT * FROM sync_transfers WHERE id=? AND device_id=?",
@@ -235,14 +246,24 @@ class SyncManager:
                     raise SyncFailure(400, 'Invalid asset timestamp') from exc
             metadata.append(value)
         now = utcnow()
+        lookup = ("""SELECT * FROM sync_transfers WHERE device_id=? AND asset_id=?
+            AND resource_type=? AND sha256=?""", (device_id, asset_id, resource_type, digest))
+        # Hash an existing completed import before taking the lock.
+        with self.catalog.connection() as db:
+            found = db.execute(*lookup).fetchone()
+        checked = {}
+        if found and found["status"] == "complete":
+            checked[(found["id"], found["stored_path"])] = self._stored_valid(found)
         with self.lock, self.catalog.connection() as db:
             self._ensure_device(db, device_id)
             if self._paused(db):
                 raise SyncFailure(423, "Sync is paused by Windows owner")
-            row = db.execute("""SELECT * FROM sync_transfers WHERE device_id=? AND asset_id=?
-                AND resource_type=? AND sha256=?""", (device_id, asset_id, resource_type, digest)).fetchone()
+            row = db.execute(*lookup).fetchone()
             if row and row["status"] == "complete":
-                if not self._stored_valid(row):
+                valid = checked.get((row["id"], row["stored_path"]))
+                if valid is None:  # Changed concurrently; rare, so recheck here.
+                    valid = self._stored_valid(row)
+                if not valid:
                     db.execute("UPDATE sync_transfers SET status='failed' WHERE id=?", (row["id"],))
                     row = db.execute("SELECT * FROM sync_transfers WHERE id=?", (row["id"],)).fetchone()
             if row and row["status"] == "pending":
@@ -317,10 +338,14 @@ class SyncManager:
                        (new_offset, utcnow(), transfer_id))
             return {"transfer_id": transfer_id, "offset": new_offset, "size": row["size"], "status": "pending"}
 
-    def cancel(self, device_id: str, transfer_id: str) -> dict:
+    def cancel(self, device_id: str, transfer_id: str, *, owner=False) -> dict:
+        # The Windows owner may discard staging of a revoked device; a device
+        # itself is already rejected by authentication once revoked.
         with self.lock:
             with self.catalog.connection() as db:
-                row = self._transfer(db, transfer_id, device_id)
+                row = self._transfer(db, transfer_id, device_id, require_active=not owner)
+                if transfer_id in self._finalizing:
+                    raise SyncFailure(409, 'Transfer is being finalized and cannot be cancelled')
                 if row['status'] == 'complete':
                     raise SyncFailure(409, 'Completed originals cannot be cancelled or deleted')
                 db.execute("UPDATE sync_transfers SET status='failed',offset=0,updated_at=? WHERE id=?",
@@ -328,61 +353,129 @@ class SyncManager:
             (self.staging / (transfer_id + '.part')).unlink(missing_ok=True)
         return {'cancelled': True}
 
+    def _finalize(self, row) -> Path:
+        """Copy and verify a fully staged resource; runs without the global lock."""
+        transfer_id = row['id']
+        source = check_path(self.staging / (transfer_id + '.part'))
+        if not source.is_file():
+            raise SyncFailure(409, 'Staged resource unavailable; restart transfer')
+        extension = Path(row['filename']).suffix.lower()
+        dest_dir = self.inbox / row['sha256'][:2]
+        # Content-addressed bytes; logical filenames and Live Photo links stay in DB.
+        dest = dest_dir / (row['sha256'] + extension)
+        with self.catalog.connection() as db:
+            candidates = db.execute("SELECT * FROM sync_transfers WHERE sha256=? AND size=? AND status='complete'",
+                                    (row['sha256'], row['size'])).fetchall()
+        for candidate in candidates:
+            if self._stored_valid(candidate):
+                candidate_path = Path(candidate['stored_path'])
+                if candidate_path.parent == dest_dir and candidate_path.suffix == extension:
+                    dest = candidate_path
+                    break
+        # Verified bytes wait under a hidden, non-photo name in the destination
+        # folder: scans index only photo extensions, and publishing is then
+        # an atomic same-directory rename (never cross-directory/volume).
+        private_name = '.' + transfer_id + '.verified'
+        try:
+            with SafeDirectory(dest_dir) as directory:
+                try:
+                    existing = directory.digest(dest.name)
+                except FileNotFoundError:
+                    existing = None
+            if existing is not None and existing != row['sha256']:
+                # Preserve a possibly user-edited/corrupt import. Recover to
+                # a new path instead of overwriting it or blocking forever.
+                dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
+                existing = None
+            if existing is None:
+                with SafeDirectory(dest_dir) as directory:
+                    # The copy briefly needs the resource twice; fail before
+                    # writing rather than with ENOSPC part-way. Staging is kept.
+                    if shutil.disk_usage(directory.path).free < row['size'] + 1024**3:
+                        raise SyncFailure(507, 'Insufficient import storage; free space and complete again',
+                                          expected_offset=row['offset'])
+                    directory.copy(source, private_name, expected=row['sha256'])
+        except ChecksumMismatch:
+            with self.lock, self.catalog.connection() as db:
+                db.execute("UPDATE sync_transfers SET status='failed',updated_at=? WHERE id=?",
+                           (utcnow(), transfer_id))
+            source.unlink(missing_ok=True)
+            raise SyncFailure(422, 'Final SHA-256 mismatch, transfer reset')
+        private_written = existing is None
+        publish = private_written
+        try:
+            while True:
+                with self.lock, self.catalog.connection() as db:
+                    # Revoke/pause may have happened during the unlocked copy. On
+                    # refusal nothing becomes visible in the import folder and the
+                    # staged bytes are kept for a later retry.
+                    self._ensure_device(db, row['device_id'])
+                    if self._paused(db):
+                        raise SyncFailure(423, 'Sync is paused by Windows owner')
+                    current = db.execute('SELECT status,offset FROM sync_transfers WHERE id=?', (transfer_id,)).fetchone()
+                    if current is None or current['status'] != 'pending' or current['offset'] != row['size']:
+                        raise SyncFailure(409, 'Transfer changed while finalizing; retrieve its status')
+                    # Publish before the commit: after a crash in between, the
+                    # retry finds these verified bytes and reuses them.
+                    if not publish or self._publish(private_name, dest):
+                        db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
+                                   (str(dest), utcnow(), transfer_id))
+                        break
+                # Another transfer published this name meanwhile. Hash it
+                # without the lock, then recheck everything above again.
+                with SafeDirectory(dest_dir) as directory:
+                    same = directory.digest(dest.name) == row['sha256']
+                if same:
+                    publish = False
+                else:
+                    dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
+        finally:
+            if private_written:
+                with SafeDirectory(dest_dir) as directory:
+                    try:
+                        directory._unlink(private_name)
+                    except FileNotFoundError:
+                        pass
+        # Keep staged bytes until the durable DB commit; a crash can safely retry.
+        source.unlink(missing_ok=True)
+        return dest
+
+    @staticmethod
+    def _publish(private_name, dest) -> bool:
+        """Atomic same-directory rename; False (no hashing here) if dest exists."""
+        with SafeDirectory(dest.parent) as directory:
+            try:
+                directory._commit(private_name, dest.name, False)  # Never replaces.
+                return True
+            except FileExistsError:
+                return False
+
     def complete(self, device_id: str, transfer_id: str) -> dict:
         with self.lock:
             with self.catalog.connection() as db:
                 if self._paused(db):
                     raise SyncFailure(423, 'Sync is paused by Windows owner')
                 row = dict(self._transfer(db, transfer_id, device_id))
-            if row['status'] == 'complete':
-                if self._stored_valid(row):
-                    return {'status': 'complete', 'transfer_id': transfer_id}
-                with self.catalog.connection() as db:
-                    db.execute("UPDATE sync_transfers SET status='failed',updated_at=? WHERE id=?",
-                               (utcnow(), transfer_id))
-                raise SyncFailure(409, 'Completed file is missing or corrupt; begin the transfer again')
-            if row['status'] != 'pending' or row['offset'] != row['size']:
-                raise SyncFailure(409, 'Upload incomplete', expected_offset=row['offset'])
-            source = check_path(self.staging / (transfer_id + '.part'))
-            if not source.is_file():
-                raise SyncFailure(409, 'Staged resource unavailable; restart transfer')
-            extension = Path(row['filename']).suffix.lower()
-            dest_dir = self.inbox / row['sha256'][:2]
-            # Content-addressed bytes; logical filenames and Live Photo links stay in DB.
-            dest = dest_dir / (row['sha256'] + extension)
-            with self.catalog.connection() as db:
-                candidates = db.execute("SELECT * FROM sync_transfers WHERE sha256=? AND size=? AND status='complete'",
-                                        (row['sha256'], row['size'])).fetchall()
-            for candidate in candidates:
-                if self._stored_valid(candidate):
-                    candidate_path = Path(candidate['stored_path'])
-                    if candidate_path.parent == dest_dir and candidate_path.suffix == extension:
-                        dest = candidate_path
-                        break
-            try:
-                with SafeDirectory(dest_dir) as directory:
-                    try:
-                        existing = directory.digest(dest.name)
-                    except FileNotFoundError:
-                        existing = None
-                    if existing is not None and existing != row['sha256']:
-                        # Preserve a possibly user-edited/corrupt import. Recover to
-                        # a new path instead of overwriting it or blocking forever.
-                        dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
-                        existing = None
-                    if existing is None:
-                        directory.copy(source, dest.name, expected=row['sha256'], replace=False)
-            except ChecksumMismatch:
-                with self.catalog.connection() as db:
-                    db.execute("UPDATE sync_transfers SET status='failed',updated_at=? WHERE id=?",
-                               (utcnow(), transfer_id))
-                source.unlink(missing_ok=True)
-                raise SyncFailure(422, 'Final SHA-256 mismatch, transfer reset')
-            with self.catalog.connection() as db:
-                db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
-                           (str(dest), utcnow(), transfer_id))
-            # Keep staged bytes until the durable DB commit; a crash can safely retry.
-            source.unlink(missing_ok=True)
+            if transfer_id in self._finalizing:
+                raise SyncFailure(409, 'Transfer is still being finalized; retry shortly',
+                                  expected_offset=row['offset'])
+            finalize = row['status'] == 'pending' and row['offset'] == row['size']
+            if finalize:
+                # Reserve the staged file: chunks and cancel are refused meanwhile.
+                self._finalizing.add(transfer_id)
+        if row['status'] == 'complete':
+            if self._stored_valid(row):
+                return {'status': 'complete', 'transfer_id': transfer_id}
+            self._mark_failed_if_unchanged(row)
+            raise SyncFailure(409, 'Completed file is missing or corrupt; begin the transfer again')
+        if not finalize:
+            raise SyncFailure(409, 'Upload incomplete', expected_offset=row['offset'])
+        try:
+            dest = self._finalize(row)
+        finally:
+            with self.lock:
+                self._finalizing.discard(transfer_id)
+        extension = Path(row['filename']).suffix.lower()
         if extension in SUPPORTED_EXTENSIONS:
             try:
                 roots = self.catalog.folders()

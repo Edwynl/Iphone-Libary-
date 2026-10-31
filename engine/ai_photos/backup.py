@@ -1,6 +1,7 @@
 """Explicit, verified resource backups. Original files are never written."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -240,6 +241,52 @@ def backup_local(catalog: PhotoCatalog, target: Path, *, apply=False) -> dict:
             'note': 'Immutable snapshots retained; originals and previous backup versions are never replaced or deleted'}
 
 
+def _s3_missing(exc):
+    # Only a confirmed absence counts as missing; AccessDenied and other
+    # errors propagate so they can never be mistaken for "safe to write".
+    code = str((getattr(exc, 'response', None) or {}).get('Error', {}).get('Code', ''))
+    return code in {'404', 'NoSuchKey', 'NotFound'}
+
+
+def _s3_previous(client, bucket, key):
+    """Content keys referenced by the last published complete manifest."""
+    try:
+        payload = client.get_object(Bucket=bucket, Key=key)['Body'].read()
+    except Exception as exc:
+        if _s3_missing(exc):
+            return {}
+        raise
+    manifest = _validate_manifest(json.loads(payload))
+    if manifest['version'] != 2:
+        return {}
+    return {r['sha256']: r['backup_path'] for r in manifest['files']}
+
+
+def _s3_verified(client, bucket, key, digest, size):
+    """True only when the stored bytes are proven to hash to digest."""
+    try:
+        head = client.head_object(Bucket=bucket, Key=key, ChecksumMode='ENABLED')
+    except Exception as exc:
+        if _s3_missing(exc):
+            return False
+        raise
+    if head.get('ContentLength') != size or (head.get('Metadata') or {}).get('sha256') != digest:
+        return False
+    try:
+        provider = base64.b64decode(head.get('ChecksumSHA256') or '', validate=True)
+    except ValueError:
+        provider = b''
+    if len(provider) == 32:  # A provider-computed full-object SHA-256.
+        return provider.hex() == digest
+    # Missing, composite (multipart, "...-N") or malformed: metadata is only
+    # what this tool claimed, so read the actual bytes back and hash them.
+    hashed = hashlib.sha256()
+    body = client.get_object(Bucket=bucket, Key=key)['Body']
+    for block in iter(lambda: body.read(1024 * 1024), b''):
+        hashed.update(block)
+    return hashed.hexdigest() == digest
+
+
 def backup_s3(catalog: PhotoCatalog, *, bucket: str, endpoint_url=None,
               prefix='windows-ai-photos', apply=False) -> dict:
     if not bucket or not bucket.strip():
@@ -249,37 +296,76 @@ def backup_s3(catalog: PhotoCatalog, *, bucket: str, endpoint_url=None,
     if any(p in {'.', '..'} for p in prefix.split('/')):
         raise ValueError('Unsafe cloud backup prefix')
     _, records, issues = _inventory(catalog)
-    uploaded = 0
-    manifest = []
+    uploaded = unchanged = 0
+    saved = []
     client = None
+    snapshot_id = None
+    latest_published = False
+    base = prefix.strip('/')
+    key_for = lambda *parts: '/'.join(p for p in (base, *parts) if p)
     if apply and not issues:
         import boto3
         client = boto3.client('s3', endpoint_url=endpoint_url)
-    for record in records if not issues else []:
-        key = '/'.join(p for p in (prefix.strip('/'), record['root_id'], record['relative']) if p)
-        if apply:
-            source = Path(record['path'])
+        try:
+            from boto3.s3.transfer import TransferConfig
+            # Single-part uploads up to 4 GiB let the provider keep a
+            # full-object SHA-256 that is checked against the local digest.
+            upload_args = {'Config': TransferConfig(multipart_threshold=4 * 1024 ** 3)}
+        except ImportError:
+            upload_args = {}
+        try:
+            known = _s3_previous(client, bucket, key_for('backup-manifest.json'))
+        except Exception as exc:  # Unreadable history: fail closed, write nothing.
+            issues.append({'path': key_for('backup-manifest.json'), 'error': str(exc)})
+            client = None
+    for record in records if client else []:
+        source = Path(record['path'])
+        try:
             digest = sha256_file(source)
             if record['resources'] and {r['sha256'] for r in record['resources']} != {digest}:
-                issues.append({'path': str(source), 'error': 'Resource checksum mismatch'})
-                continue
-            before = source.stat()
-            client.upload_file(str(source), bucket, key, ExtraArgs={
-                'Metadata': {'sha256': digest}, 'ChecksumAlgorithm': 'SHA256'})
-            after = source.stat()
-            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or sha256_file(source) != digest:
-                issues.append({'path': str(source), 'error': 'Source changed during upload; retry required'})
-                continue
-            manifest.append(dict(record, sha256=digest, backup_path=key))
-            uploaded += 1
-    if client:
-        client.put_object(Bucket=bucket, Key=prefix.strip('/') + '/backup-manifest.json',
-                          Body=json.dumps(_manifest(manifest, issues), ensure_ascii=False).encode(),
-                          ContentType='application/json', ChecksumAlgorithm='SHA256')
+                raise ValueError('Resource checksum mismatch')
+            key = known.get(digest)
+            if key and _s3_verified(client, bucket, key, digest, record['size']):
+                unchanged += 1
+            else:
+                # Every upload gets a fresh key, so no outcome of this run
+                # (denied HEAD, changing source, partial write) can replace
+                # bytes that an earlier snapshot references.
+                key = key_for('objects', digest[:2], digest, uuid4().hex + source.suffix.lower())
+                before = source.stat()
+                client.upload_file(str(source), bucket, key, ExtraArgs={
+                    'Metadata': {'sha256': digest}, 'ChecksumAlgorithm': 'SHA256'}, **upload_args)
+                after = source.stat()
+                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or sha256_file(source) != digest:
+                    raise OSError('Source changed during upload; retry required')
+                if not _s3_verified(client, bucket, key, digest, record['size']):
+                    raise OSError('Uploaded object failed size/checksum verification')
+                known[digest] = key
+                uploaded += 1
+            saved.append(dict(record, sha256=digest, backup_path=key,
+                              restore_path=(Path(record['root_id']) / record['relative']).as_posix()))
+        except Exception as exc:
+            issues.append({'path': str(source), 'error': str(exc)})
+    if client and not issues:
+        # Publish only complete snapshots; a failed run never replaces the
+        # last restorable cloud manifest. The snapshot precedes the pointer.
+        snapshot_id = uuid4().hex
+        manifest = dict(_manifest(saved, []), version=2, snapshot_id=snapshot_id,
+                        created_at=datetime.now(timezone.utc).isoformat())
+        body = json.dumps(manifest, ensure_ascii=False).encode()
+        try:
+            for key in (key_for('snapshots', snapshot_id + '.json'), key_for('backup-manifest.json')):
+                client.put_object(Bucket=bucket, Key=key, Body=body,
+                                  ContentType='application/json', ChecksumAlgorithm='SHA256')
+            latest_published = True
+        except Exception as exc:
+            issues.append({'path': key_for('backup-manifest.json'), 'error': str(exc)})
     return {'mode': 's3', 'dry_run': not apply, 'complete': not issues, 'issues': issues,
-            'bucket': bucket, 'objects': len(records), 'uploaded': uploaded,
+            'bucket': bucket, 'objects': len(records), 'uploaded': uploaded, 'unchanged': unchanged,
+            'snapshot_id': snapshot_id, 'latest_published': latest_published,
             'bytes_planned': sum(r['size'] for r in records),
-            'note': 'TLS transport; no client-side encryption. Enable bucket versioning and test restores.'}
+            'note': 'TLS transport; no client-side encryption. Objects use unique keys and manifests '
+                    'are published only when complete; still enable bucket versioning.'}
 
 
 def _load_snapshot(backup, snapshot=None):

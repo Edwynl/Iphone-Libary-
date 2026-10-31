@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from multiprocessing import connection
 from pathlib import Path
 
@@ -71,11 +71,36 @@ def _protect(data: bytes, *, decrypt=False) -> bytes:
         _kernel.LocalFree(outgoing.data)
 
 
+STARTUP_SECONDS = 15
+CONTROL_WAIT_SECONDS = 20  # Covers a starter's spawn/readiness handshake.
+
+
 @contextmanager
-def receiver_lease(home):
+def receiver_lease(home, name='agent.lock', *, wait=0.0):
     """One agent per data directory; never kill a process by an untrusted PID."""
+    deadline = time.monotonic() + wait
+    with ExitStack() as stack:
+        while True:  # Retry acquisition only, never the guarded body.
+            try:
+                stack.enter_context(_lease(home, name))
+                break
+            except ReceiverBusy:
+                if time.monotonic() >= deadline:
+                    raise
+            time.sleep(0.05)
+        yield
+
+
+def control_lease(home):
+    # Held by start() from spawn until readiness and by stop() throughout, so
+    # a stop can never report success while a spawned child is still pending.
+    return receiver_lease(home, 'control.lock', wait=CONTROL_WAIT_SECONDS)
+
+
+@contextmanager
+def _lease(home, name):
     with SafeDirectory(Path(home) / 'receiver') as directory:
-        path = directory.path / 'agent.lock'
+        path = directory.path / name
         if os.name == 'nt':
             handle = _kernel.CreateFileW(str(path), 0x80000000, 0, None, 4, 0x00200000, None)
             if handle == ctypes.c_void_p(-1).value:
@@ -89,7 +114,7 @@ def receiver_lease(home):
                 _kernel.CloseHandle(handle)
         else:
             import fcntl
-            descriptor = os.open('agent.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory.fd)
+            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory.fd)
             try:
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -170,6 +195,10 @@ class ReceiverController:
     def start(self, *, port=8787, inbox=None):
         if type(port) is not int or not 0 <= port <= 65535 or port in {8765, 8766}:
             raise ValueError('Use an independent receiver port (not 8765/8766)')
+        with control_lease(self.home):
+            return self._start(port, inbox)
+
+    def _start(self, port, inbox):
         status = self.status()
         if status['running']:
             if port and status['port'] != port:
@@ -181,13 +210,30 @@ class ReceiverController:
         arguments = [sys.executable, '-m', 'ai_photos.receiver_agent', '--home', str(self.home),
                      '--port', str(port), '--instance', instance,
                      '--inbox', str(Path(inbox or default_inbox()).expanduser().resolve())]
-        options = {'creationflags': subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP |
-                    subprocess.CREATE_BREAKAWAY_FROM_JOB} if os.name == 'nt' else {'start_new_session': True}
-        child = subprocess.Popen(arguments, cwd=Path(__file__).resolve().parents[1],
+        common = dict(cwd=Path(__file__).resolve().parents[1],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, env=dict(os.environ, AI_PHOTOS_HOME=str(self.home)), **options)
+            close_fds=True, env=dict(os.environ, AI_PHOTOS_HOME=str(self.home)))
+        if os.name == 'nt':
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            try:
+                child = subprocess.Popen(arguments, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **common)
+            except OSError as exc:
+                # A host job that forbids breakaway may (directly or through an
+                # enclosing job) kill its children on close, which cannot be
+                # ruled out reliably, so never start a receiver that might
+                # silently die with the window.
+                if getattr(exc, 'winerror', None) != 5:
+                    raise
+                if os.environ.get('AI_PHOTOS_RECEIVER_JOB_BOUND') != '1':
+                    raise RuntimeError('This app was launched inside a Windows job that does not allow the '
+                                       'receiver to outlive it; start Windows AI Photos normally and retry') from exc
+                # Explicit opt-in (CI, debugging hosts): the receiver may stop
+                # with this host, and its status says so instead of implying it persists.
+                child = subprocess.Popen(arguments + ['--job-bound'], creationflags=flags, **common)
+        else:
+            child = subprocess.Popen(arguments, start_new_session=True, **common)
         self._child = child
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + STARTUP_SECONDS
         while time.monotonic() < deadline:
             status = self.status()
             if status['running']:
@@ -207,16 +253,39 @@ class ReceiverController:
                     pass
                 raise RuntimeError('Receiver exited before startup; no existing service was replaced')
             time.sleep(0.05)
-        raise TimeoutError('Receiver startup still pending; inspect its status before retrying')
+        # Still holding the control lease: end our own child (by its process
+        # handle, never a PID from disk) so a later stop() cannot report
+        # success while it might still come up.
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+            try:
+                with receiver_lease(self.home):
+                    with open_source(self.directory / 'state.json') as stream:
+                        ours = json.load(stream).get('instance') == instance
+                    if ours:
+                        (self.directory / 'state.json').unlink()
+            except (OSError, ValueError, ReceiverBusy):
+                pass
+        raise TimeoutError('Receiver did not become ready in time and was stopped; retry')
 
     def stop(self):
+        with control_lease(self.home):
+            return self._stop()
+
+    def _stop(self):
         status = self.status()
         if not status['running']:
-            if status.get('error'):
-                raise RuntimeError('Cannot confirm receiver state: ' + status['error'])
-            with receiver_lease(self.home):
-                (self.directory / 'state.json').unlink(missing_ok=True)
-                return {'stopped': True}
+            try:
+                # Holding the lease proves no agent runs; stale state from an
+                # unclean exit (kill, crash, power loss) is safe to discard.
+                with receiver_lease(self.home):
+                    (self.directory / 'state.json').unlink(missing_ok=True)
+            except ReceiverBusy as exc:
+                if status.get('error'):
+                    raise RuntimeError('Cannot confirm receiver state: ' + status['error']) from exc
+                raise
+            return {'stopped': True, 'stale_state_removed': bool(status.get('error'))}
         self.request('stop')
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
@@ -245,11 +314,11 @@ def _manage(manager, action, params):
     if action == 'revoke':
         return manager.revoke_device(params['device_id'])
     if action == 'cancel':
-        return manager.cancel(params['device_id'], params['transfer_id'])
+        return manager.cancel(params['device_id'], params['transfer_id'], owner=True)
     raise ValueError('Unknown receiver action')
 
 
-def run_receiver(home, inbox, port, instance):
+def run_receiver(home, inbox, port, instance, job_bound=False):
     if port in {8765, 8766}:
         raise ValueError('Protected preview/service ports cannot host the receiver')
     home = Path(home).resolve()
@@ -287,7 +356,8 @@ def run_receiver(home, inbox, port, instance):
                             raise ValueError('Receiver control authentication required')
                         action = message.get('action')
                         status = {'running': True, 'pid': os.getpid(), 'port': server.port,
-                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent'}
+                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent',
+                                  'job_bound': job_bound}
                         if action == 'status':
                             data = status
                         elif action == 'pairing':
@@ -298,7 +368,9 @@ def run_receiver(home, inbox, port, instance):
                         else:
                             data = _manage(server.sync_manager, action, message.get('params') or {})
                         response = {'ok': True, 'instance': instance, 'data': data}
-                    except (OSError, EOFError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+                    except Exception as exc:
+                        # Any failed request (SyncFailure, sqlite3.Error, ...) is
+                        # reported to its caller; it never stops the receiver.
                         response = {'ok': False, 'instance': instance, 'error': str(exc)}
                     try:
                         channel.send_bytes(json.dumps(response).encode())
@@ -325,9 +397,10 @@ def main():
     parser.add_argument('--inbox', type=Path, required=True)
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--instance', required=True)
+    parser.add_argument('--job-bound', action='store_true')
     args = parser.parse_args()
     try:
-        run_receiver(args.home, args.inbox, args.port, args.instance)
+        run_receiver(args.home, args.inbox, args.port, args.instance, args.job_bound)
     except ReceiverBusy:
         return 2
     except Exception as exc:

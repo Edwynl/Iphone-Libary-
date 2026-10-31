@@ -92,12 +92,13 @@ struct SyncAPI {
         base.appendingPathComponent(path.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
     }
 
-    private func makeRequest(_ path: String, method: String, token: String, data: Data? = nil) -> URLRequest {
+    private func makeRequest(_ path: String, method: String, token: String, data: Data? = nil,
+                             timeout: TimeInterval = 90) -> URLRequest {
         var request = URLRequest(url: endpoint(path))
         request.httpMethod = method
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 90
+        request.timeoutInterval = timeout
         request.allowsExpensiveNetworkAccess = !wifiOnly
         request.allowsCellularAccess = !wifiOnly
         request.allowsConstrainedNetworkAccess = !wifiOnly
@@ -109,8 +110,8 @@ struct SyncAPI {
     }
 
     private func send<T: Decodable>(_ path: String, method: String, token: String,
-                                    payload: Data? = nil) async throws -> T {
-        let request = makeRequest(path, method: method, token: token, data: payload)
+                                    payload: Data? = nil, timeout: TimeInterval = 90) async throws -> T {
+        let request = makeRequest(path, method: method, token: token, data: payload, timeout: timeout)
         let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: request)
@@ -174,6 +175,12 @@ struct SyncAPI {
                                                           method: "GET", token: deviceToken)
                 guard fresh.size == exported.size, fresh.offset >= 0, fresh.offset <= exported.size,
                       (fresh.chunk_bytes ?? 0) > 0, (fresh.chunk_bytes ?? 0) <= 8 * 1024 * 1024 else { throw SyncAPIError.invalidResponse }
+                if fresh.status == "complete" { return }
+                // A cancelled/failed transfer never accepts chunks again; the next
+                // pass begins a fresh transfer. An unchanged offset would loop.
+                guard fresh.status == "pending", fresh.offset != offset else {
+                    throw SyncAPIError.http(409, "Transfer is no longer pending; it restarts on the next pass")
+                }
                 offset = fresh.offset
                 state = fresh
                 continue
@@ -186,8 +193,10 @@ struct SyncAPI {
             guard reply.offset == offset + Int64(bytes.count) else { throw SyncAPIError.invalidResponse }
             offset = reply.offset
         }
+        // Windows copies and hashes the whole resource before replying; a large
+        // video can take minutes with no bytes on the wire.
         let done: CompleteReply = try await send("api/sync/v1/transfers/\(state.transfer_id)/complete",
-                                                   method: "POST", token: deviceToken)
+                                                   method: "POST", token: deviceToken, timeout: 30 * 60)
         guard done.status == "complete" else { throw SyncAPIError.invalidResponse }
     }
 }
