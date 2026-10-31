@@ -71,6 +71,15 @@
                   HorizontalAlignment="Stretch" Content="Organize / 整理照片"/>
           <Button x:Name="DuplicatesButton" Click="DuplicatesButton_Click"
                   HorizontalAlignment="Stretch" Content="Find duplicates / 查找重复"/>
+          <Button x:Name="IPhoneImportButton" Click="IPhoneImportButton_Click"
+                  HorizontalAlignment="Stretch" Content="从 iPhone 导入（数据线）"/>
+          <ToggleSwitch x:Name="AutoImportToggle" Toggled="AutoImportToggle_Toggled" Margin="0,-6,0,0"
+                        OnContent="插上 iPhone 自动导入" OffContent="插上 iPhone 自动导入" FontSize="12"/>
+          <HyperlinkButton x:Name="ImportDestinationButton" Click="ImportDestinationButton_Click" Margin="0,-8,0,0"
+                           Padding="2,0" ToolTipService.ToolTip="iPhone 照片按月份保存到这个文件夹">
+            <TextBlock x:Name="ImportDestinationText" FontSize="11" TextWrapping="Wrap"
+                       Text="保存位置：未设置（点此选择）"/>
+          </HyperlinkButton>
           <Button x:Name="MobileButton" Click="MobileButton_Click"
                   HorizontalAlignment="Stretch" Content="Enable iPhone pairing / 开启同步"/>
           <Button x:Name="ManageSyncButton" Click="ManageSyncButton_Click"

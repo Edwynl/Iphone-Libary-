@@ -28,6 +28,10 @@ public sealed partial class MainWindow : Window
     private bool _loadingMore;
     private int _browseVersion;
     private ScrollViewer? _gridScroll;
+    private IPhoneImporter? _iphone;
+    private string _importDestination = "";
+    private bool _loadingImportSettings;
+    private bool _importing;
     private bool _selecting;
     private string MediaType => MediaFilter.SelectedIndex == 1 ? "photo" : MediaFilter.SelectedIndex == 2 ? "video" : "all";
 
@@ -41,7 +45,7 @@ public sealed partial class MainWindow : Window
             if (_gridScroll is not null) _gridScroll.ViewChanged += (_, _) => _ = LoadMoreIfNearEndAsync();
         };
         FolderList.ItemsSource = _folders;
-        Closed += (_, _) => _engine?.Dispose();
+        Closed += (_, _) => { _iphone?.Dispose(); _engine?.Dispose(); };
     }
 
     private async void Root_Loaded(object sender, RoutedEventArgs e)
@@ -57,6 +61,12 @@ public sealed partial class MainWindow : Window
             await RefreshFoldersAsync();
             await BrowseAsync(reset: true);
             await RefreshSyncSidebarAsync();
+            await LoadImportSettingsAsync();
+            _iphone = new IPhoneImporter();
+            _iphone.DeviceArrived += () => DispatcherQueue.TryEnqueue(async () =>
+            {
+                if (AutoImportToggle.IsOn) await ImportFromIPhoneAsync(auto: true);
+            });
         }
         catch (Exception ex) { ShowError("Cannot start local engine", ex); }
     }
@@ -185,6 +195,7 @@ public sealed partial class MainWindow : Window
         OrganizeButton.IsEnabled = !busy;
         MobileButton.IsEnabled = !busy;
         ManageSyncButton.IsEnabled = !busy;
+        IPhoneImportButton.IsEnabled = !busy;
         BackupButton.IsEnabled = !busy;
         CloudButton.IsEnabled = !busy;
         SelectButton.IsEnabled = !busy;
@@ -207,6 +218,12 @@ public sealed partial class MainWindow : Window
             int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
             StatusText.Text = $"正在比对重复文件 {done:N0}/{total:N0}（首次需读取全部视频，较慢）· 原文件不会被删除";
         }
+        else if (stage == "importing")
+        {
+            int done = payload.TryGetProperty("done", out var d) ? d.GetInt32() : 0;
+            int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
+            StatusText.Text = $"正在去重并归档 iPhone 照片 {done:N0}/{total:N0}";
+        }
         else if (stage == "installing")
             StatusText.Text = "Downloading AI model to your computer (one-time operation)...";
         else if (stage == "warning")
@@ -227,6 +244,122 @@ public sealed partial class MainWindow : Window
             await ScanAsync();
         }
         catch (Exception ex) { ShowError("Cannot add folder", ex); }
+    }
+
+    private const string IPhoneHint = "请用数据线连接 iPhone 并解锁，在手机上点“信任此电脑”。" +
+        "如果仍然找不到，请安装 Apple 设备驱动（Microsoft Store 中的“Apple 设备”App 或 iTunes）。";
+
+    private async Task LoadImportSettingsAsync()
+    {
+        var settings = await CallAsync("device_import_settings");
+        _importDestination = Str(settings, "destination");
+        ShowImportDestination();
+        _loadingImportSettings = true;
+        AutoImportToggle.IsOn = settings.GetProperty("auto").GetBoolean();
+        _loadingImportSettings = false;
+    }
+
+    private async Task<bool> EnsureImportDestinationAsync()
+    {
+        if (_importDestination.Length > 0 && Directory.Exists(_importDestination)) return true;
+        return await PickImportDestinationAsync();
+    }
+
+    private async Task<bool> PickImportDestinationAsync()
+    {
+        await ShowMessageAsync("选择 iPhone 照片的保存位置",
+            "iPhone 的照片和视频会按月份（例如 2026-10）复制到这个文件夹，并自动加入图库。iPhone 上的内容不会被删除或修改。" +
+            "\n\n不要选已在图库中的文件夹的上级文件夹（例如已添加 F:\\iphone\\2026.09.19 时不要选 F:\\iphone）。");
+        var picker = new FolderPicker();
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var folder = await picker.PickSingleFolderAsync();
+        if (folder is null) return false;
+        await CallAsync("device_import_settings", new { destination = folder.Path });
+        _importDestination = folder.Path;
+        ShowImportDestination();
+        return true;
+    }
+
+    private void ShowImportDestination() =>
+        ImportDestinationText.Text = _importDestination.Length == 0
+            ? "保存位置：未设置（点此选择）" : $"保存到：{_importDestination}（点此更改）";
+
+    private async void ImportDestinationButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_working) return;
+        try { await PickImportDestinationAsync(); }
+        catch (Exception ex) { ShowError("Cannot change iPhone import folder", ex); }
+    }
+
+    private async void IPhoneImportButton_Click(object sender, RoutedEventArgs e) =>
+        await ImportFromIPhoneAsync(auto: false);
+
+    private async void AutoImportToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        if (_loadingImportSettings) return;
+        try
+        {
+            if (AutoImportToggle.IsOn && !await EnsureImportDestinationAsync())
+            {
+                _loadingImportSettings = true;
+                AutoImportToggle.IsOn = false;
+                _loadingImportSettings = false;
+                return;
+            }
+            await CallAsync("device_import_settings", new { auto = AutoImportToggle.IsOn });
+            if (AutoImportToggle.IsOn) await ImportFromIPhoneAsync(auto: true);  // It may already be plugged in.
+        }
+        catch (Exception ex) { ShowError("Cannot change iPhone import setting", ex); }
+    }
+
+    private async Task ImportFromIPhoneAsync(bool auto)
+    {
+        // Device arrival fires once per interface; only the first import proceeds.
+        if (_working || _importing) return;
+        _importing = true;
+        try
+        {
+            var source = await IPhoneImporter.FindIPhoneAsync();
+            if (source is null)
+            {
+                if (!auto) await ShowMessageAsync("没有找到 iPhone", IPhoneHint);
+                return;
+            }
+            if (!await EnsureImportDestinationAsync()) return;
+            IPhoneImportOutcome outcome;
+            SetBusy(true);
+            try
+            {
+                outcome = await IPhoneImporter.ImportAsync(source, _importDestination, CallAsync,
+                    text => DispatcherQueue.TryEnqueue(() => StatusText.Text = text));
+            }
+            finally { SetBusy(false); }
+
+            if (outcome.State is "locked" or "empty")
+            {
+                // Tapping "Trust" re-announces the device, so auto mode retries by itself.
+                StatusText.Text = "已检测到 iPhone，但读不到相册：请解锁手机并点“信任此电脑”" +
+                    (auto ? "，之后会自动开始导入。" : "，然后再点“从 iPhone 导入”。");
+                if (!auto) await ShowMessageAsync("iPhone 相册暂时读不到", IPhoneHint);
+                return;
+            }
+            if (outcome.Copied > 0)
+            {
+                await RefreshFoldersAsync();
+                await ScanAsync();
+            }
+            if (outcome.State == "nothing-new")
+                StatusText.Text = $"iPhone 已是最新：{outcome.Found:N0} 项都已导入过或已在图库中。";
+            else
+                StatusText.Text = (outcome.State == "interrupted" ? "iPhone 导入中断（已复制的部分已保存，重新连接后会继续）：" : "iPhone 导入完成：") +
+                    $"新增 {outcome.Copied:N0} 个文件，跳过已有 {outcome.AlreadyHave:N0} 项，" +
+                    $"去掉完全相同的重复 {outcome.Duplicates:N0} 个。保存在 {_importDestination}";
+            if (outcome.State == "interrupted")
+                await ShowMessageAsync("iPhone 导入中断", "已复制的照片已保存。请保持数据线连接并解锁 iPhone，再点“从 iPhone 导入”继续。\n\n" + outcome.Error);
+        }
+        catch (Exception ex) { ShowError("iPhone import failed", ex); }
+        finally { _importing = false; }
     }
 
     private async void RemoveFolderButton_Click(object sender, RoutedEventArgs e)

@@ -10,7 +10,8 @@ MODEL_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
 SUPPORTED_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".heic", ".heif", ".avif"
 })
-SKIP_DIRS = frozenset({".git", "node_modules", "$recycle.bin", "system volume information"})
+# ".wap-importing" holds in-progress iPhone imports (see device_import.py).
+SKIP_DIRS = frozenset({".git", "node_modules", "$recycle.bin", "system volume information", ".wap-importing"})
 
 
 def app_home() -> Path:
