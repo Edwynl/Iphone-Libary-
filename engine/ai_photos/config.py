@@ -10,10 +10,7 @@ MODEL_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
 SUPPORTED_EXTENSIONS = frozenset({
     ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif", ".heic", ".heif"
 })
-# Private sync area inside the import folder: verified bytes wait there until
-# a transfer is authorized to publish, so a scan must never index it.
-FINALIZING_DIR = ".wap-finalizing"
-SKIP_DIRS = frozenset({".git", "node_modules", "$recycle.bin", "system volume information", FINALIZING_DIR})
+SKIP_DIRS = frozenset({".git", "node_modules", "$recycle.bin", "system volume information"})
 
 
 def app_home() -> Path:

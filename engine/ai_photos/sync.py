@@ -14,7 +14,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import FINALIZING_DIR, SUPPORTED_EXTENSIONS
+from .config import SUPPORTED_EXTENSIONS
 from .file_safety import SafeDirectory, check_path, ChecksumMismatch
 from .duplicates import sha256_file
 
@@ -372,8 +372,10 @@ class SyncManager:
                 if candidate_path.parent == dest_dir and candidate_path.suffix == extension:
                     dest = candidate_path
                     break
-        private_dir = self.inbox / FINALIZING_DIR
-        private_name = transfer_id + '.verified'  # Not a photo extension either.
+        # Verified bytes wait under a hidden, non-photo name in the destination
+        # folder: scans index only photo extensions, and publishing is then
+        # an atomic same-directory rename (never cross-directory/volume).
+        private_name = '.' + transfer_id + '.verified'
         try:
             with SafeDirectory(dest_dir) as directory:
                 try:
@@ -386,14 +388,13 @@ class SyncManager:
                 dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
                 existing = None
             if existing is None:
-                with SafeDirectory(private_dir) as private:
+                with SafeDirectory(dest_dir) as directory:
                     # The copy briefly needs the resource twice; fail before
                     # writing rather than with ENOSPC part-way. Staging is kept.
-                    if shutil.disk_usage(private.path).free < row['size'] + 1024**3:
+                    if shutil.disk_usage(directory.path).free < row['size'] + 1024**3:
                         raise SyncFailure(507, 'Insufficient import storage; free space and complete again',
                                           expected_offset=row['offset'])
-                    # Verified bytes stay private until the locked recheck below.
-                    private.copy(source, private_name, expected=row['sha256'])
+                    directory.copy(source, private_name, expected=row['sha256'])
         except ChecksumMismatch:
             with self.lock, self.catalog.connection() as db:
                 db.execute("UPDATE sync_transfers SET status='failed',updated_at=? WHERE id=?",
@@ -414,14 +415,14 @@ class SyncManager:
                 if existing is None:
                     # Publish before the commit: after a crash in between, the
                     # retry finds these verified bytes and reuses them.
-                    dest = self._publish(private_dir, private_name, dest, row['sha256'], extension)
+                    dest = self._publish(private_name, dest, row['sha256'], extension)
                 db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
                            (str(dest), utcnow(), transfer_id))
         finally:
             if existing is None:
-                with SafeDirectory(private_dir) as private:
+                with SafeDirectory(dest_dir) as directory:
                     try:
-                        private._unlink(private_name)
+                        directory._unlink(private_name)
                     except FileNotFoundError:
                         pass
         # Keep staged bytes until the durable DB commit; a crash can safely retry.
@@ -429,17 +430,17 @@ class SyncManager:
         return dest
 
     @staticmethod
-    def _publish(private_dir, private_name, dest, digest, extension) -> Path:
-        with SafeDirectory(private_dir) as private, SafeDirectory(dest.parent) as directory:
+    def _publish(private_name, dest, digest, extension) -> Path:
+        with SafeDirectory(dest.parent) as directory:
             try:
-                directory.move_from(private, private_name, dest.name)
+                directory._commit(private_name, dest.name, False)  # Never replaces.
                 return dest
             except FileExistsError:
                 pass
             if directory.digest(dest.name) == digest:
                 return dest  # The same bytes were published concurrently.
             dest = dest.parent / (digest + '-recovered-' + secrets.token_hex(8) + extension)
-            directory.move_from(private, private_name, dest.name)
+            directory._commit(private_name, dest.name, False)
             return dest
 
     def complete(self, device_id: str, transfer_id: str) -> dict:

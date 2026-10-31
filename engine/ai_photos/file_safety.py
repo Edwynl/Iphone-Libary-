@@ -209,18 +209,6 @@ class SafeDirectory:
         if self.fd is not None:
             os.fsync(self.fd)
 
-    def move_from(self, source, source_name, name):
-        """Move a file from another pinned directory; never replaces an existing name."""
-        source_name, name = self._name(source_name), self._name(name)
-        if os.name == "nt":
-            if is_reparse(self.path / name):
-                raise ValueError("Refusing linked output file")
-            os.rename(source.path / source_name, self.path / name)  # Fails if name exists.
-        else:
-            os.link(source_name, name, src_dir_fd=source.fd, dst_dir_fd=self.fd, follow_symlinks=False)
-            os.unlink(source_name, dir_fd=source.fd)
-            os.fsync(self.fd)
-
     def copy(self, source, name, *, expected=None, replace=True):
         temporary, output = self._temporary()
         try:

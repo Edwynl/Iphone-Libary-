@@ -292,7 +292,7 @@ def test_undecodable_files_are_counted_as_errors_but_not_updates(tmp_path):
 
 
 def visible_imports(manager):
-    return [p for p in manager.inbox.rglob('*') if p.is_file() and '.wap-finalizing' not in p.parts]
+    return [p for p in manager.inbox.rglob('*') if p.is_file() and not p.name.endswith('.verified')]
 
 
 @pytest.mark.parametrize('interrupt', ['revoke', 'pause'])
@@ -320,7 +320,7 @@ def test_revoke_or_pause_during_unlocked_copy_publishes_nothing(tmp_path, interr
     assert error.value.status == (401 if interrupt == 'revoke' else 423)
     assert (manager.staging / (tid + '.part')).is_file()
     assert visible_imports(manager) == []
-    assert not any((manager.inbox / '.wap-finalizing').iterdir())
+    assert not list(manager.inbox.rglob('*.verified'))
     cat.scan()
     assert cat.browse() == []
     with manager.catalog.connection() as db:
