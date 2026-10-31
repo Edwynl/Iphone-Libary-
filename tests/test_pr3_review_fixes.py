@@ -143,10 +143,11 @@ class S3Error(Exception):
 class FakeS3:
     """Stores object bodies so overwrites and corruption are observable."""
 
-    def __init__(self):
+    def __init__(self, checksum='full'):
         self.bodies, self.metadata, self.puts = {}, {}, []
         self.head_error = None
         self.during_upload = None
+        self.checksum = checksum  # 'full', None, 'composite' or 'malformed'
 
     def upload_file(self, path, bucket, key, ExtraArgs, Config=None):
         if self.during_upload:
@@ -160,8 +161,15 @@ class FakeS3:
         if Key not in self.bodies:
             raise S3Error('404')
         body = self.bodies[Key]
-        return {'ContentLength': len(body), 'Metadata': self.metadata[Key],
-                'ChecksumSHA256': base64.b64encode(hashlib.sha256(body).digest()).decode()}
+        reply = {'ContentLength': len(body), 'Metadata': self.metadata[Key]}
+        full = base64.b64encode(hashlib.sha256(body).digest()).decode()
+        if self.checksum == 'full':
+            reply['ChecksumSHA256'] = full
+        elif self.checksum == 'composite':
+            reply['ChecksumSHA256'] = full + '-3'
+        elif self.checksum == 'malformed':
+            reply['ChecksumSHA256'] = 'not-base64!'
+        return reply
 
     def get_object(self, Bucket, Key):
         if Key not in self.bodies:
@@ -232,12 +240,14 @@ def test_s3_source_change_during_upload_keeps_previous_snapshot_intact(photo_lib
     assert fake.bodies['windows-ai-photos/backup-manifest.json'] == pointer
 
 
-def test_s3_corrupt_stored_object_is_uploaded_again_under_a_new_key(photo_library, monkeypatch):
+@pytest.mark.parametrize('checksum', ['full', None, 'composite', 'malformed'])
+def test_s3_corrupt_stored_object_is_uploaded_again_under_a_new_key(photo_library, monkeypatch, checksum):
     cat, _ = photo_library
-    fake = FakeS3()
+    fake = FakeS3(checksum)
     run_s3(cat, fake, monkeypatch)
     corrupt = next(iter(object_snapshot(fake)))
-    fake.bodies[corrupt] = b'bit-rot'
+    # Same length and untouched metadata: only the bytes themselves differ.
+    fake.bodies[corrupt] = bytes(b ^ 0xFF for b in fake.bodies[corrupt])
     result = run_s3(cat, fake, monkeypatch)
     assert result['complete'] and result['uploaded'] == 1 and result['unchanged'] == 1
     manifest = json.loads(fake.bodies['windows-ai-photos/backup-manifest.json'])
@@ -281,10 +291,22 @@ def test_undecodable_files_are_counted_as_errors_but_not_updates(tmp_path):
     assert (third['updated'], third['errors']) == (1, 0)
 
 
+def visible_imports(manager):
+    return [p for p in manager.inbox.rglob('*') if p.is_file() and '.wap-finalizing' not in p.parts]
+
+
 @pytest.mark.parametrize('interrupt', ['revoke', 'pause'])
-def test_revoke_or_pause_during_unlocked_copy_is_not_committed(tmp_path, interrupt):
-    _, manager, device = manager_at(tmp_path)
-    tid = staged(manager, device)
+def test_revoke_or_pause_during_unlocked_copy_publishes_nothing(tmp_path, interrupt):
+    cat, manager, device = manager_at(tmp_path)
+    buffer = io.BytesIO()
+    Image.new('RGB', (12, 12), 'purple').save(buffer, 'PNG')
+    data = buffer.getvalue()
+    body = {'asset_id': 'png-asset', 'resource_type': 'photo', 'filename': 'IMG.PNG',
+            'sha256': hashlib.sha256(data).hexdigest(), 'size': len(data)}
+    tid = manager.begin(device, body)['transfer_id']
+    manager.write_chunk(device, tid, 0, data, body['sha256'])
+    manager.inbox.mkdir(parents=True, exist_ok=True)
+    cat.add_folder(str(manager.inbox))
     original = SafeDirectory.copy
 
     def copy_then_interrupt(self, *args, **kwargs):
@@ -297,11 +319,54 @@ def test_revoke_or_pause_during_unlocked_copy_is_not_committed(tmp_path, interru
             manager.complete(device, tid)
     assert error.value.status == (401 if interrupt == 'revoke' else 423)
     assert (manager.staging / (tid + '.part')).is_file()
+    assert visible_imports(manager) == []
+    assert not any((manager.inbox / '.wap-finalizing').iterdir())
+    cat.scan()
+    assert cat.browse() == []
     with manager.catalog.connection() as db:
         assert db.execute('SELECT status FROM sync_transfers WHERE id=?', (tid,)).fetchone()[0] == 'pending'
     if interrupt == 'pause':
         manager.set_paused(False)
         assert manager.complete(device, tid)['status'] == 'complete'
+        assert len(visible_imports(manager)) == 1
+
+
+def test_start_timeout_stops_its_own_child_before_releasing_control(tmp_path, monkeypatch):
+    from ai_photos import receiver_agent
+    real = receiver_agent.subprocess.Popen
+    spawned = []
+
+    def never_ready(arguments, **kwargs):  # A child that never takes the agent lease.
+        spawned.append(real([sys.executable, '-c', 'import time; time.sleep(60)'], **kwargs))
+        return spawned[-1]
+
+    monkeypatch.setattr(receiver_agent, 'STARTUP_SECONDS', 0.5)
+    monkeypatch.setattr(receiver_agent.subprocess, 'Popen', never_ready)
+    controller = ReceiverController(tmp_path / 'state')
+    with pytest.raises(TimeoutError, match='was stopped'):
+        controller.start(port=0, inbox=tmp_path / 'imports')
+    assert spawned and spawned[0].poll() is not None
+    assert controller.stop()['stopped']
+
+
+def test_concurrent_first_use_of_a_safe_directory(tmp_path):
+    target = tmp_path / 'fresh' / 'nested'
+    barrier, errors = threading.Barrier(8), []
+
+    def enter():
+        barrier.wait()
+        try:
+            with SafeDirectory(target):
+                pass
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=enter) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert errors == [] and target.is_dir()
 
 
 def test_stop_waits_for_a_pending_starter_instead_of_reporting_stopped(tmp_path, monkeypatch):

@@ -263,6 +263,7 @@ def _s3_previous(client, bucket, key):
 
 
 def _s3_verified(client, bucket, key, digest, size):
+    """True only when the stored bytes are proven to hash to digest."""
     try:
         head = client.head_object(Bucket=bucket, Key=key, ChecksumMode='ENABLED')
     except Exception as exc:
@@ -271,12 +272,19 @@ def _s3_verified(client, bucket, key, digest, size):
         raise
     if head.get('ContentLength') != size or (head.get('Metadata') or {}).get('sha256') != digest:
         return False
-    provider = head.get('ChecksumSHA256')
-    if provider and '-' not in provider:  # Full-object checksum computed by the provider.
-        return provider == base64.b64encode(bytes.fromhex(digest)).decode()
-    # Composite (multipart) or unsupported checksum: the key was written once by
-    # this tool after a stable-source upload; size and recorded digest must match.
-    return True
+    try:
+        provider = base64.b64decode(head.get('ChecksumSHA256') or '', validate=True)
+    except ValueError:
+        provider = b''
+    if len(provider) == 32:  # A provider-computed full-object SHA-256.
+        return provider.hex() == digest
+    # Missing, composite (multipart, "...-N") or malformed: metadata is only
+    # what this tool claimed, so read the actual bytes back and hash them.
+    hashed = hashlib.sha256()
+    body = client.get_object(Bucket=bucket, Key=key)['Body']
+    for block in iter(lambda: body.read(1024 * 1024), b''):
+        hashed.update(block)
+    return hashed.hexdigest() == digest
 
 
 def backup_s3(catalog: PhotoCatalog, *, bucket: str, endpoint_url=None,

@@ -46,27 +46,6 @@ if os.name == 'nt':
     _kernel.LocalFree.argtypes = [ctypes.c_void_p]
     _kernel.LocalFree.restype = ctypes.c_void_p
 
-    class _BasicLimits(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
-        _fields_ = [('per_process_time', ctypes.c_int64), ('per_job_time', ctypes.c_int64),
-                    ('flags', wintypes.DWORD), ('min_working_set', ctypes.c_size_t),
-                    ('max_working_set', ctypes.c_size_t), ('active_processes', wintypes.DWORD),
-                    ('affinity', ctypes.c_size_t), ('priority', wintypes.DWORD), ('scheduling', wintypes.DWORD)]
-
-    _kernel.GetCurrentProcess.restype = wintypes.HANDLE
-    _kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
-    _kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
-                                                  wintypes.DWORD, ctypes.c_void_p]
-
-    def _job_allows_unbroken_child():
-        """True only when our (innermost) job is confirmed not KILL_ON_JOB_CLOSE."""
-        in_job = wintypes.BOOL()
-        if not _kernel.IsProcessInJob(_kernel.GetCurrentProcess(), None, ctypes.byref(in_job)) or not in_job:
-            return False  # Unknown, or WinError 5 was not a breakaway refusal.
-        limits = _BasicLimits()
-        if not _kernel.QueryInformationJobObject(None, 2, ctypes.byref(limits), ctypes.sizeof(limits), None):
-            return False
-        return not limits.flags & 0x2000
-
     class _LocalPipeListener(connection.PipeListener):
         def _new_handle(self, first=False):
             flags = _winapi.PIPE_ACCESS_DUPLEX | _winapi.FILE_FLAG_OVERLAPPED
@@ -92,6 +71,7 @@ def _protect(data: bytes, *, decrypt=False) -> bytes:
         _kernel.LocalFree(outgoing.data)
 
 
+STARTUP_SECONDS = 15
 CONTROL_WAIT_SECONDS = 20  # Covers a starter's spawn/readiness handshake.
 
 
@@ -238,17 +218,18 @@ class ReceiverController:
             try:
                 child = subprocess.Popen(arguments, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **common)
             except OSError as exc:
-                # A host job without JOB_OBJECT_LIMIT_BREAKAWAY_OK rejects the
-                # flag. Stay in that job only if closing it cannot kill us; the
-                # receiver then reports job_bound so the UI can say so.
-                if getattr(exc, 'winerror', None) != 5 or not _job_allows_unbroken_child():
-                    raise RuntimeError('This host keeps child processes in a job that ends with it; '
-                                       'start pairing from a normal Windows session') from exc
-                child = subprocess.Popen(arguments + ['--job-bound'], creationflags=flags, **common)
+                # A host job that forbids breakaway may (directly or through an
+                # enclosing job) kill its children on close, which cannot be
+                # ruled out reliably, so never start a receiver that might
+                # silently die with the window.
+                if getattr(exc, 'winerror', None) != 5:
+                    raise
+                raise RuntimeError('This app was launched inside a Windows job that does not allow the '
+                                   'receiver to outlive it; start Windows AI Photos normally and retry') from exc
         else:
             child = subprocess.Popen(arguments, start_new_session=True, **common)
         self._child = child
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + STARTUP_SECONDS
         while time.monotonic() < deadline:
             status = self.status()
             if status['running']:
@@ -268,7 +249,21 @@ class ReceiverController:
                     pass
                 raise RuntimeError('Receiver exited before startup; no existing service was replaced')
             time.sleep(0.05)
-        raise TimeoutError('Receiver startup still pending; inspect its status before retrying')
+        # Still holding the control lease: end our own child (by its process
+        # handle, never a PID from disk) so a later stop() cannot report
+        # success while it might still come up.
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=10)
+            try:
+                with receiver_lease(self.home):
+                    with open_source(self.directory / 'state.json') as stream:
+                        ours = json.load(stream).get('instance') == instance
+                    if ours:
+                        (self.directory / 'state.json').unlink()
+            except (OSError, ValueError, ReceiverBusy):
+                pass
+        raise TimeoutError('Receiver did not become ready in time and was stopped; retry')
 
     def stop(self):
         with control_lease(self.home):
@@ -319,7 +314,7 @@ def _manage(manager, action, params):
     raise ValueError('Unknown receiver action')
 
 
-def run_receiver(home, inbox, port, instance, job_bound=False):
+def run_receiver(home, inbox, port, instance):
     if port in {8765, 8766}:
         raise ValueError('Protected preview/service ports cannot host the receiver')
     home = Path(home).resolve()
@@ -357,8 +352,7 @@ def run_receiver(home, inbox, port, instance, job_bound=False):
                             raise ValueError('Receiver control authentication required')
                         action = message.get('action')
                         status = {'running': True, 'pid': os.getpid(), 'port': server.port,
-                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent',
-                                  'job_bound': job_bound}
+                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent'}
                         if action == 'status':
                             data = status
                         elif action == 'pairing':
@@ -398,10 +392,9 @@ def main():
     parser.add_argument('--inbox', type=Path, required=True)
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--instance', required=True)
-    parser.add_argument('--job-bound', action='store_true')
     args = parser.parse_args()
     try:
-        run_receiver(args.home, args.inbox, args.port, args.instance, args.job_bound)
+        run_receiver(args.home, args.inbox, args.port, args.instance)
     except ReceiverBusy:
         return 2
     except Exception as exc:

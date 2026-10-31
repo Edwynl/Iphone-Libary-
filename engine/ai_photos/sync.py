@@ -14,7 +14,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import SUPPORTED_EXTENSIONS
+from .config import FINALIZING_DIR, SUPPORTED_EXTENSIONS
 from .file_safety import SafeDirectory, check_path, ChecksumMismatch
 from .duplicates import sha256_file
 
@@ -372,45 +372,75 @@ class SyncManager:
                 if candidate_path.parent == dest_dir and candidate_path.suffix == extension:
                     dest = candidate_path
                     break
+        private_dir = self.inbox / FINALIZING_DIR
+        private_name = transfer_id + '.verified'  # Not a photo extension either.
         try:
             with SafeDirectory(dest_dir) as directory:
                 try:
                     existing = directory.digest(dest.name)
                 except FileNotFoundError:
                     existing = None
-                if existing is not None and existing != row['sha256']:
-                    # Preserve a possibly user-edited/corrupt import. Recover to
-                    # a new path instead of overwriting it or blocking forever.
-                    dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
-                    existing = None
-                if existing is None:
+            if existing is not None and existing != row['sha256']:
+                # Preserve a possibly user-edited/corrupt import. Recover to
+                # a new path instead of overwriting it or blocking forever.
+                dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
+                existing = None
+            if existing is None:
+                with SafeDirectory(private_dir) as private:
                     # The copy briefly needs the resource twice; fail before
                     # writing rather than with ENOSPC part-way. Staging is kept.
-                    if shutil.disk_usage(directory.path).free < row['size'] + 1024**3:
+                    if shutil.disk_usage(private.path).free < row['size'] + 1024**3:
                         raise SyncFailure(507, 'Insufficient import storage; free space and complete again',
                                           expected_offset=row['offset'])
-                    directory.copy(source, dest.name, expected=row['sha256'], replace=False)
+                    # Verified bytes stay private until the locked recheck below.
+                    private.copy(source, private_name, expected=row['sha256'])
         except ChecksumMismatch:
             with self.lock, self.catalog.connection() as db:
                 db.execute("UPDATE sync_transfers SET status='failed',updated_at=? WHERE id=?",
                            (utcnow(), transfer_id))
             source.unlink(missing_ok=True)
             raise SyncFailure(422, 'Final SHA-256 mismatch, transfer reset')
-        with self.lock, self.catalog.connection() as db:
-            # Revoke/pause may have happened during the unlocked copy. Staging
-            # is kept on refusal; the verified content-addressed copy is
-            # reused by a later completion of the same bytes.
-            self._ensure_device(db, row['device_id'])
-            if self._paused(db):
-                raise SyncFailure(423, 'Sync is paused by Windows owner')
-            current = db.execute('SELECT status,offset FROM sync_transfers WHERE id=?', (transfer_id,)).fetchone()
-            if current is None or current['status'] != 'pending' or current['offset'] != row['size']:
-                raise SyncFailure(409, 'Transfer changed while finalizing; retrieve its status')
-            db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
-                       (str(dest), utcnow(), transfer_id))
+        try:
+            with self.lock, self.catalog.connection() as db:
+                # Revoke/pause may have happened during the unlocked copy. On
+                # refusal nothing becomes visible in the import folder and the
+                # staged bytes are kept for a later retry.
+                self._ensure_device(db, row['device_id'])
+                if self._paused(db):
+                    raise SyncFailure(423, 'Sync is paused by Windows owner')
+                current = db.execute('SELECT status,offset FROM sync_transfers WHERE id=?', (transfer_id,)).fetchone()
+                if current is None or current['status'] != 'pending' or current['offset'] != row['size']:
+                    raise SyncFailure(409, 'Transfer changed while finalizing; retrieve its status')
+                if existing is None:
+                    # Publish before the commit: after a crash in between, the
+                    # retry finds these verified bytes and reuses them.
+                    dest = self._publish(private_dir, private_name, dest, row['sha256'], extension)
+                db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
+                           (str(dest), utcnow(), transfer_id))
+        finally:
+            if existing is None:
+                with SafeDirectory(private_dir) as private:
+                    try:
+                        private._unlink(private_name)
+                    except FileNotFoundError:
+                        pass
         # Keep staged bytes until the durable DB commit; a crash can safely retry.
         source.unlink(missing_ok=True)
         return dest
+
+    @staticmethod
+    def _publish(private_dir, private_name, dest, digest, extension) -> Path:
+        with SafeDirectory(private_dir) as private, SafeDirectory(dest.parent) as directory:
+            try:
+                directory.move_from(private, private_name, dest.name)
+                return dest
+            except FileExistsError:
+                pass
+            if directory.digest(dest.name) == digest:
+                return dest  # The same bytes were published concurrently.
+            dest = dest.parent / (digest + '-recovered-' + secrets.token_hex(8) + extension)
+            directory.move_from(private, private_name, dest.name)
+            return dest
 
     def complete(self, device_id: str, transfer_id: str) -> dict:
         with self.lock:

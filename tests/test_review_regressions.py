@@ -322,12 +322,14 @@ def test_s3_backups_include_all_resources_manifest_and_checksums(tmp_path, monke
         uploads.append((a, k))
         stored[a[2]] = (Path(a[0]).read_bytes(), k['ExtraArgs']['Metadata'])
 
-    def missing(**k):
+    def stored_or_missing(**k):
+        if k['Key'] in stored:  # Read-back hashing when no provider checksum is returned.
+            return {'Body': io.BytesIO(stored[k['Key']][0])}
         error = LookupError('NoSuchKey')
         error.response = {'Error': {'Code': 'NoSuchKey'}}
         raise error
 
-    fake = SimpleNamespace(upload_file=upload_file, put_object=lambda **k: objects.append(k), get_object=missing,
+    fake = SimpleNamespace(upload_file=upload_file, put_object=lambda **k: objects.append(k), get_object=stored_or_missing,
                            head_object=lambda **k: {'ContentLength': len(stored[k['Key']][0]),
                                                     'Metadata': stored[k['Key']][1]})
     monkeypatch.setitem(sys.modules, 'boto3', SimpleNamespace(client=lambda *a, **k: fake))

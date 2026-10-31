@@ -111,8 +111,10 @@ class SafeDirectory:
             chain = [*reversed(self.path.parents), self.path]
             if os.name == "nt":
                 for directory in chain:
-                    if not directory.exists():
+                    try:
                         directory.mkdir()
+                    except FileExistsError:
+                        pass  # Includes a concurrent creator; the handle below validates it.
                     handle = _win_handle(directory, True)
                     self._stack.callback(_kernel.CloseHandle, handle)
                 # A normal directory must remain nonempty to prevent SET_REPARSE
@@ -203,6 +205,18 @@ class SafeDirectory:
             os.link(temporary, name, src_dir_fd=self.fd, dst_dir_fd=self.fd, follow_symlinks=False)
             self._unlink(temporary)
         if self.fd is not None:
+            os.fsync(self.fd)
+
+    def move_from(self, source, source_name, name):
+        """Move a file from another pinned directory; never replaces an existing name."""
+        source_name, name = self._name(source_name), self._name(name)
+        if os.name == "nt":
+            if is_reparse(self.path / name):
+                raise ValueError("Refusing linked output file")
+            os.rename(source.path / source_name, self.path / name)  # Fails if name exists.
+        else:
+            os.link(source_name, name, src_dir_fd=source.fd, dst_dir_fd=self.fd, follow_symlinks=False)
+            os.unlink(source_name, dir_fd=source.fd)
             os.fsync(self.fd)
 
     def copy(self, source, name, *, expected=None, replace=True):
