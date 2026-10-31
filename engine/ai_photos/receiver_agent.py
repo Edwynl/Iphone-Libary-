@@ -181,11 +181,21 @@ class ReceiverController:
         arguments = [sys.executable, '-m', 'ai_photos.receiver_agent', '--home', str(self.home),
                      '--port', str(port), '--instance', instance,
                      '--inbox', str(Path(inbox or default_inbox()).expanduser().resolve())]
-        options = {'creationflags': subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP |
-                    subprocess.CREATE_BREAKAWAY_FROM_JOB} if os.name == 'nt' else {'start_new_session': True}
-        child = subprocess.Popen(arguments, cwd=Path(__file__).resolve().parents[1],
+        common = dict(cwd=Path(__file__).resolve().parents[1],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, env=dict(os.environ, AI_PHOTOS_HOME=str(self.home)), **options)
+            close_fds=True, env=dict(os.environ, AI_PHOTOS_HOME=str(self.home)))
+        if os.name == 'nt':
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            try:
+                child = subprocess.Popen(arguments, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **common)
+            except OSError as exc:
+                # A parent job without JOB_OBJECT_LIMIT_BREAKAWAY_OK rejects the
+                # flag; the receiver then shares the host's job lifetime.
+                if getattr(exc, 'winerror', None) != 5:
+                    raise
+                child = subprocess.Popen(arguments, creationflags=flags, **common)
+        else:
+            child = subprocess.Popen(arguments, start_new_session=True, **common)
         self._child = child
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -212,11 +222,16 @@ class ReceiverController:
     def stop(self):
         status = self.status()
         if not status['running']:
-            if status.get('error'):
-                raise RuntimeError('Cannot confirm receiver state: ' + status['error'])
-            with receiver_lease(self.home):
-                (self.directory / 'state.json').unlink(missing_ok=True)
-                return {'stopped': True}
+            try:
+                # Holding the lease proves no agent runs; stale state from an
+                # unclean exit (kill, crash, power loss) is safe to discard.
+                with receiver_lease(self.home):
+                    (self.directory / 'state.json').unlink(missing_ok=True)
+            except ReceiverBusy as exc:
+                if status.get('error'):
+                    raise RuntimeError('Cannot confirm receiver state: ' + status['error']) from exc
+                raise
+            return {'stopped': True, 'stale_state_removed': bool(status.get('error'))}
         self.request('stop')
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
@@ -245,7 +260,7 @@ def _manage(manager, action, params):
     if action == 'revoke':
         return manager.revoke_device(params['device_id'])
     if action == 'cancel':
-        return manager.cancel(params['device_id'], params['transfer_id'])
+        return manager.cancel(params['device_id'], params['transfer_id'], owner=True)
     raise ValueError('Unknown receiver action')
 
 
@@ -298,7 +313,9 @@ def run_receiver(home, inbox, port, instance):
                         else:
                             data = _manage(server.sync_manager, action, message.get('params') or {})
                         response = {'ok': True, 'instance': instance, 'data': data}
-                    except (OSError, EOFError, ValueError, TypeError, RuntimeError, KeyError) as exc:
+                    except Exception as exc:
+                        # Any failed request (SyncFailure, sqlite3.Error, ...) is
+                        # reported to its caller; it never stops the receiver.
                         response = {'ok': False, 'instance': instance, 'error': str(exc)}
                     try:
                         channel.send_bytes(json.dumps(response).encode())

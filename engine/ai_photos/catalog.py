@@ -183,9 +183,13 @@ class PhotoCatalog:
             return 0, False, False
         p = str(path)
         previous = db.execute("SELECT id,size,mtime_ns,thumb_path,error,name FROM photos WHERE path=?", (p,)).fetchone()
-        changed = previous is None or previous["size"] != stat.st_size or previous["mtime_ns"] != stat.st_mtime_ns or bool(previous['error'])
-        if changed:
+        changed = previous is None or previous["size"] != stat.st_size or previous["mtime_ns"] != stat.st_mtime_ns
+        if changed or previous['error']:
+            # An unchanged undecodable file is retried (a decoder may have been
+            # installed) but only rewritten and reported once it decodes.
             thumbnail, width, height, taken_or_error = prepared[1] if prepared else self._thumb(path, stat.st_mtime_ns)
+            if not changed and not thumbnail:
+                return previous["id"], False, False
             error = None if thumbnail else taken_or_error
             taken = taken_or_error if thumbnail else None
             db.execute("""
@@ -269,9 +273,11 @@ class PhotoCatalog:
                     p = str(path)
                     seen_paths.add(p)
                     seen += 1
-                    db.commit()  # Release preceding writes before decoding the next image.
+                    if db.in_transaction:
+                        db.commit()  # Release preceding writes before decoding the next image.
                     photo_id, was_updated, decodable = self._upsert(db, root, path)
-                    db.commit()
+                    if was_updated:
+                        db.commit()  # Unchanged files only read; they need no commit/fsync.
                     if photo_id == 0:
                         errors += 1
                         continue
