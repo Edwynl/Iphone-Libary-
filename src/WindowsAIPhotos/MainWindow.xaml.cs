@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
 {
     private const int PageSize = 120;
     private readonly ObservableCollection<PhotoCard> _photos = new();
+    private readonly ObservableCollection<DuplicateGroup> _duplicateGroups = new();
     private readonly ObservableCollection<string> _folders = new();
     private PythonEngineBridge? _engine;
     private bool _started;
@@ -50,6 +51,7 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         InitializeBoxSelection();
         PhotoGrid.ItemsSource = _photos;
+        DuplicateGroupList.ItemsSource = _duplicateGroups;
         PhotoGrid.Loaded += (_, _) => _gridScroll ??= FindChild<ScrollViewer>(PhotoGrid);
         FolderList.ItemsSource = _folders;
         Closed += (_, _) => { _iphone?.Dispose(); _engine?.Dispose(); };
@@ -114,6 +116,16 @@ public sealed partial class MainWindow : Window
         row.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString() ?? "" : "";
 
+    /// <summary>A card for an engine photo row (browse, search or duplicate groups).</summary>
+    private static PhotoCard? CardFrom(JsonElement row)
+    {
+        var path = Str(row, "path");
+        if (path.Length == 0) return null;
+        var date = row.TryGetProperty("mtime_ns", out var element) && element.TryGetInt64(out var ns) ? ns : 0;
+        return PhotoCard.Create(path, Str(row, "name"), Str(row, "thumb_path"), date, Str(row, "taken_at"),
+            Str(row, "media_kind"), Str(row, "companion"));
+    }
+
     private void DisplayPhotos(JsonElement json, bool append)
     {
         if (!append)
@@ -123,13 +135,7 @@ public sealed partial class MainWindow : Window
         }
         foreach (var row in json.EnumerateArray())
         {
-            var path = Str(row, "path");
-            if (path.Length == 0) continue;
-            var date = row.TryGetProperty("mtime_ns", out var element) && element.TryGetInt64(out var ns)
-                ? ns : 0;
-            var card = PhotoCard.Create(path, Str(row, "name"), Str(row, "thumb_path"), date, Str(row, "taken_at"),
-                Str(row, "media_kind"), Str(row, "companion"));
-            _photos.Add(card);
+            if (CardFrom(row) is { } card) _photos.Add(card);
         }
         EmptyState.Visibility = _photos.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Text = _folders.Count == 0 ? "Choose Add photo folder to begin."
@@ -155,6 +161,7 @@ public sealed partial class MainWindow : Window
     private async Task SearchAsync()
     {
         string query = SearchBox.Text.Trim();
+        ShowDuplicateView(false);
         if (query.Length == 0) { await BrowseAsync(true); return; }
         _browseVersion++;
         _isSearch = true;
@@ -212,6 +219,7 @@ public sealed partial class MainWindow : Window
         SelectButton.IsEnabled = !busy;
         SelectAllButton.IsEnabled = !busy;
         RecycleButton.IsEnabled = !busy && _selecting && PhotoGrid.SelectedItems.Count > 0;
+        UpdateDuplicateSelection();
     }
 
     private void HandleProgress(JsonElement payload)
@@ -453,29 +461,91 @@ public sealed partial class MainWindow : Window
         {
             StatusText.Text = "Checking exact and visually similar photos. Originals are never deleted.";
             var data = await CallAsync("duplicates", new { distance = 4 });
-            var exact = data.GetProperty("exact_groups");
-            var similar = data.GetProperty("similar_groups");
-            var lines = new System.Collections.Generic.List<string>
+            _duplicateGroups.Clear();
+            foreach (var (key, exact) in new[] { ("exact_groups", true), ("similar_groups", false) })
             {
-                $"Exact duplicate groups (SHA-256): {exact.GetArrayLength()}",
-                $"Visually similar groups (review only): {similar.GetArrayLength()}",
-                "", "No automatic deletion is performed."
-            };
-            int shown = 0;
-            foreach (var group in exact.EnumerateArray())
-            {
-                if (shown++ >= 8) break;
-                lines.Add("- " + string.Join(" | ", group.EnumerateArray().Select(p => Str(p, "name"))));
+                foreach (var group in data.GetProperty(key).EnumerateArray())
+                {
+                    var cards = group.EnumerateArray().Select(CardFrom).OfType<PhotoCard>();
+                    _duplicateGroups.Add(new DuplicateGroup { Exact = exact, Photos = new(cards) });
+                }
             }
-            if (similar.GetArrayLength() > 0) lines.AddRange(new[] { "", "相似照片（前 20 组，请人工核对）：" });
-            foreach (var group in similar.EnumerateArray().Take(20))
-                lines.Add("- " + string.Join(" | ", group.EnumerateArray().Select(p => Str(p, "name"))));
-            await ShowMessageAsync("Duplicate photo review", string.Join(Environment.NewLine, lines));
             StatusText.Text = "Duplicate analysis finished. Photo originals remain untouched.";
+            if (_duplicateGroups.Count == 0)
+            {
+                await ShowMessageAsync("Duplicate photo review", "没有找到重复或相似的照片。");
+                return;
+            }
+            ShowDuplicateView(true);
+            UpdateDuplicateSelection();
         }
         catch (Exception ex) { ShowError("Duplicate scan failed", ex); }
         finally { SetBusy(false); }
     }
+
+    private void ShowDuplicateView(bool show)
+    {
+        DuplicateView.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        LibraryView.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+        PageTitle.Text = show ? "Duplicates / 重复照片" : MediaTitles[MediaIndex];
+        if (!show) _duplicateGroups.Clear();
+    }
+
+    private void UpdateDuplicateSelection()
+    {
+        int exact = _duplicateGroups.Count(g => g.Exact);
+        int selected = _duplicateGroups.Sum(g => g.Photos.Count(p => p.IsSelected));
+        DuplicateSummary.Text = $"完全相同 {exact} 组 · 相似 {_duplicateGroups.Count - exact} 组。" +
+            "点击照片选中，双击打开原图比较；不会自动删除任何文件。";
+        DuplicateRecycleButton.Content = $"移到回收站 ({selected})";
+        DuplicateRecycleButton.IsEnabled = !_working && selected > 0;
+        SelectExtrasButton.IsEnabled = !_working && exact > 0;
+    }
+
+    private void DuplicateCard_Click(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not PhotoCard card) return;
+        card.IsSelected = !card.IsSelected;
+        UpdateDuplicateSelection();
+    }
+
+    // Two clicks first toggle the mark twice, leaving it as it was.
+    private void DuplicateCard_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is PhotoCard card) OpenOriginal(card);
+    }
+
+    // Byte-identical copies: keep the first of each group. Similar photos are never picked for the user.
+    private void SelectExtrasButton_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var group in _duplicateGroups.Where(g => g.Exact))
+        {
+            for (int i = 0; i < group.Photos.Count; i++) group.Photos[i].IsSelected = i > 0;
+        }
+        UpdateDuplicateSelection();
+    }
+
+    private void ClearDuplicateSelection_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var card in _duplicateGroups.SelectMany(g => g.Photos)) card.IsSelected = false;
+        UpdateDuplicateSelection();
+    }
+
+    private async void DuplicateRecycleButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_working) return;
+        var paths = _duplicateGroups.SelectMany(g => g.Photos).Where(p => p.IsSelected).Select(p => p.Path).ToArray();
+        if (paths.Length == 0) return;
+        var moved = await RecyclePathsAsync(paths);
+        foreach (var group in _duplicateGroups.ToArray())
+        {
+            foreach (var card in group.Photos.Where(p => moved.Contains(p.Path)).ToArray()) group.Photos.Remove(card);
+            if (group.Photos.Count < 2) _duplicateGroups.Remove(group);
+        }
+        UpdateDuplicateSelection();
+    }
+
+    private void CloseDuplicatesButton_Click(object sender, RoutedEventArgs e) => ShowDuplicateView(false);
 
     private async void MobileButton_Click(object sender, RoutedEventArgs e)
     {
@@ -553,12 +623,12 @@ public sealed partial class MainWindow : Window
     private async void MediaFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_started || _engine is null) return;
-        try { SearchBox.Text = ""; await BrowseAsync(true); }
+        try { ShowDuplicateView(false); SearchBox.Text = ""; await BrowseAsync(true); }
         catch (Exception ex) { ShowError("Cannot filter library", ex); }
     }
     private async void LibraryButton_Click(object sender, RoutedEventArgs e)
     {
-        try { SearchBox.Text = ""; await BrowseAsync(true); }
+        try { ShowDuplicateView(false); SearchBox.Text = ""; await BrowseAsync(true); }
         catch (Exception ex) { ShowError("Cannot open library", ex); }
     }
     private async void SearchButton_Click(object sender, RoutedEventArgs e)
@@ -645,12 +715,18 @@ public sealed partial class MainWindow : Window
     private async void RecycleButton_Click(object sender, RoutedEventArgs e)
     {
         if (_working) return;
-        var selected = PhotoGrid.SelectedItems.OfType<PhotoCard>().ToArray();
-        if (selected.Length == 0) return;
+        var paths = PhotoGrid.SelectedItems.OfType<PhotoCard>().Select(p => p.Path).ToArray();
+        if (paths.Length > 0) await RecyclePathsAsync(paths);
+    }
+
+    /// <summary>Reviews, confirms twice and sends files (and their Live Photo companions) to the
+    /// Recycle Bin. Returns the paths actually moved; their library cards are removed.</summary>
+    private async Task<HashSet<string>> RecyclePathsAsync(string[] paths)
+    {
+        var moved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         SetBusy(true);
         try
         {
-            var paths = selected.Select(p => p.Path).ToArray();
             var plan = await CallAsync("recycle_plan", new { paths });
             var files = plan.GetProperty("files").EnumerateArray().Select(r => new {
                 Path = Str(r, "path"), Size = r.GetProperty("size").GetInt64(),
@@ -670,19 +746,18 @@ public sealed partial class MainWindow : Window
                     Text = $"{pairing}请逐项核对。\n\n{list}" } },
                 PrimaryButtonText = "文件正确，继续", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Root.XamlRoot
             };
-            if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary) return moved;
             var final = new ContentDialog
             {
                 Title = "再次确认移动原文件",
                 Content = $"确定将列出的 {files.Length} 个文件交给 Windows 移到回收站？如果 Windows 提示永久删除，请取消。部分操作失败时可能只移动部分文件。",
                 PrimaryButtonText = "确认移到回收站", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Root.XamlRoot
             };
-            if (await final.ShowAsync() != ContentDialogResult.Primary) return;
+            if (await final.ShowAsync() != ContentDialogResult.Primary) return moved;
             // Revalidate identity and protected sync references after the confirmation dialogs.
             var fresh = await CallAsync("recycle_plan", new { paths });
             if (fresh.GetProperty("files").GetRawText() != plan.GetProperty("files").GetRawText())
                 throw new IOException("文件或配套候选已变化，请重新选择。");
-            int moved = 0;
             foreach (var file in files)
             {
                 try
@@ -700,23 +775,28 @@ public sealed partial class MainWindow : Window
                         Microsoft.VisualBasic.FileIO.UICancelOption.ThrowException);
                     foreach (var card in _photos.Where(p => string.Equals(p.Path, file.Path, StringComparison.OrdinalIgnoreCase)).ToArray())
                         _photos.Remove(card);
-                    moved++;
+                    moved.Add(file.Path);
                 }
                 catch (Exception ex)
                 {
-                    await ShowMessageAsync("操作中断", $"已移动 {moved} 个文件；其余未处理。\n{file.Path}\n{ex.Message}\n可在回收站恢复已移动的文件。");
+                    await ShowMessageAsync("操作中断", $"已移动 {moved.Count} 个文件；其余未处理。\n{file.Path}\n{ex.Message}\n可在回收站恢复已移动的文件。");
                     break;
                 }
             }
-            StatusText.Text = $"已移到回收站: {moved}/{files.Length}。请扫描以更新索引。";
+            StatusText.Text = $"已移到回收站: {moved.Count}/{files.Length}。请扫描以更新索引。";
         }
         catch (Exception ex) { ShowError("无法准备回收站操作", ex); }
         finally { SetBusy(false); }
+        return moved;
     }
 
     private void PhotoGrid_ItemClick(object sender, ItemClickEventArgs e)
     {
-        if (e.ClickedItem is not PhotoCard photo) return;
+        if (e.ClickedItem is PhotoCard photo) OpenOriginal(photo);
+    }
+
+    private void OpenOriginal(PhotoCard photo)
+    {
         try { Process.Start(new ProcessStartInfo(photo.Path) { UseShellExecute = true }); }
         catch (Exception ex) { ShowError("Cannot open original photo", ex); }
     }

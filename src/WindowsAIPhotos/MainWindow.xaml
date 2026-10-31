@@ -30,6 +30,40 @@
         <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}">
           <Setter Property="CornerRadius" Value="10"/>
         </Style>
+        <!-- A photo card, shared by the library grid and the duplicate review. -->
+        <DataTemplate x:Key="PhotoCardTemplate" x:DataType="models:PhotoCard">
+          <Grid RowSpacing="6" Padding="5">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Border CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+              <Image x:Phase="1" Source="{x:Bind CreateThumbnail()}" Stretch="UniformToFill"/>
+            </Border>
+            <!-- iOS-style selection: dimmed photo, accent frame and a check, fading in together. -->
+            <Grid Opacity="{x:Bind SelectedOpacity, Mode=OneWay}">
+              <Grid.OpacityTransition>
+                <ScalarTransition/>
+              </Grid.OpacityTransition>
+              <Border CornerRadius="10" Background="#40000000" BorderThickness="3"
+                      BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"/>
+              <Grid Width="26" Height="26" Margin="9" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+                <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}" Stroke="White" StrokeThickness="2"/>
+                <FontIcon Glyph="&#xE73E;" FontSize="12" FontWeight="Bold" Foreground="White"/>
+              </Grid>
+            </Grid>
+            <FontIcon Glyph="&#xE768;" FontSize="36" Opacity="{x:Bind PlaceholderOpacity}"
+                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border Opacity="{x:Bind BadgeOpacity}" Background="#B0000000" CornerRadius="4"
+                    Padding="6,2" Margin="6" HorizontalAlignment="Left" VerticalAlignment="Top">
+              <TextBlock Text="{x:Bind Badge}" FontSize="11" Foreground="White"/>
+            </Border>
+            <TextBlock Grid.Row="1" Text="{x:Bind FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Grid.Row="2" Text="{x:Bind Subtitle}" FontSize="11" Opacity="0.6" MaxLines="1"
+                       TextTrimming="CharacterEllipsis"/>
+          </Grid>
+        </DataTemplate>
       </ResourceDictionary>
     </Grid.Resources>
     <Grid.ColumnDefinitions>
@@ -191,7 +225,58 @@
         <ProgressBar x:Name="WorkProgress" IsIndeterminate="True" Visibility="Collapsed" Height="3"/>
       </StackPanel>
 
-      <Grid Grid.Row="3">
+      <!-- Duplicate review: each group's photos side by side; click to mark, double-click to open. -->
+      <Grid x:Name="DuplicateView" Grid.Row="3" RowSpacing="10" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid ColumnSpacing="8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="DuplicateSummary" FontSize="12" Opacity="0.75" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          <Button Grid.Column="1" x:Name="SelectExtrasButton" Content="选中多余的完全重复" Click="SelectExtrasButton_Click"
+                  ToolTipService.ToolTip="每组完全相同的照片保留第一张，选中其余副本；相似照片不会自动选中"/>
+          <Button Grid.Column="2" Content="清除选择" Click="ClearDuplicateSelection_Click"/>
+          <Button Grid.Column="3" x:Name="DuplicateRecycleButton" Content="移到回收站 (0)" IsEnabled="False"
+                  Style="{StaticResource AccentButtonStyle}" Click="DuplicateRecycleButton_Click"/>
+          <Button Grid.Column="4" Content="返回图库" Click="CloseDuplicatesButton_Click"/>
+        </Grid>
+        <ScrollViewer Grid.Row="1" Margin="-10,0,-8,0" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+          <ItemsRepeater x:Name="DuplicateGroupList">
+            <ItemsRepeater.ItemTemplate>
+              <DataTemplate x:DataType="models:DuplicateGroup">
+                <StackPanel Spacing="2" Margin="0,6,0,10">
+                  <TextBlock Text="{x:Bind Title, Mode=OneWay}" FontWeight="SemiBold" Margin="10,0,0,0"/>
+                  <GridView ItemsSource="{x:Bind Photos}" ItemTemplate="{StaticResource PhotoCardTemplate}"
+                            SelectionMode="None" IsItemClickEnabled="True" ItemClick="DuplicateCard_Click"
+                            DoubleTapped="DuplicateCard_DoubleTapped"
+                            ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                    <GridView.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <ItemsWrapGrid Orientation="Horizontal" ItemWidth="185" ItemHeight="195"/>
+                      </ItemsPanelTemplate>
+                    </GridView.ItemsPanel>
+                    <GridView.ItemContainerStyle>
+                      <Style TargetType="GridViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+                      </Style>
+                    </GridView.ItemContainerStyle>
+                  </GridView>
+                </StackPanel>
+              </DataTemplate>
+            </ItemsRepeater.ItemTemplate>
+          </ItemsRepeater>
+        </ScrollViewer>
+      </Grid>
+
+      <Grid x:Name="LibraryView" Grid.Row="3">
         <GridView x:Name="PhotoGrid" IsItemClickEnabled="True" ItemClick="PhotoGrid_ItemClick"
                   SelectionMode="None" SelectionChanged="PhotoGrid_SelectionChanged" Padding="0" Margin="-10,0,-8,0"
                   ScrollViewer.HorizontalScrollMode="Disabled"
@@ -221,39 +306,7 @@
             </Style>
           </GridView.ItemContainerStyle>
           <GridView.ItemTemplate>
-            <DataTemplate x:DataType="models:PhotoCard">
-              <Grid RowSpacing="6" Padding="5">
-                <Grid.RowDefinitions>
-                  <RowDefinition Height="*"/>
-                  <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
-                <Border CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                  <Image x:Phase="1" Source="{x:Bind CreateThumbnail()}" Stretch="UniformToFill"/>
-                </Border>
-                <!-- iOS-style selection: dimmed photo, accent frame and a check, fading in together. -->
-                <Grid Opacity="{x:Bind SelectedOpacity, Mode=OneWay}">
-                  <Grid.OpacityTransition>
-                    <ScalarTransition/>
-                  </Grid.OpacityTransition>
-                  <Border CornerRadius="10" Background="#40000000" BorderThickness="3"
-                          BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"/>
-                  <Grid Width="26" Height="26" Margin="9" HorizontalAlignment="Right" VerticalAlignment="Bottom">
-                    <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}" Stroke="White" StrokeThickness="2"/>
-                    <FontIcon Glyph="&#xE73E;" FontSize="12" FontWeight="Bold" Foreground="White"/>
-                  </Grid>
-                </Grid>
-                <FontIcon Glyph="&#xE768;" FontSize="36" Opacity="{x:Bind PlaceholderOpacity}"
-                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                <Border Opacity="{x:Bind BadgeOpacity}" Background="#B0000000" CornerRadius="4"
-                        Padding="6,2" Margin="6" HorizontalAlignment="Left" VerticalAlignment="Top">
-                  <TextBlock Text="{x:Bind Badge}" FontSize="11" Foreground="White"/>
-                </Border>
-                <TextBlock Grid.Row="1" Text="{x:Bind FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
-                <TextBlock Grid.Row="2" Text="{x:Bind Subtitle}" FontSize="11" Opacity="0.6" MaxLines="1"
-                           TextTrimming="CharacterEllipsis"/>
-              </Grid>
-            </DataTemplate>
+            <StaticResource ResourceKey="PhotoCardTemplate"/>
           </GridView.ItemTemplate>
         </GridView>
         <!-- Drag-to-select box, drawn above the grid (see MainWindow.BoxSelection.cs). -->

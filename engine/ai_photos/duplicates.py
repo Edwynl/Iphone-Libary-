@@ -73,7 +73,9 @@ def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4, progress=N
             sha256 TEXT NOT NULL,
             dhash TEXT
         )""")
-        rows = db.execute("SELECT id,path,name,size,mtime_ns FROM photos ORDER BY id").fetchall()
+        # Live Photo motion is left out: it is reviewed and recycled together with its still.
+        rows = db.execute("""SELECT id,path,name,size,mtime_ns,thumb_path,taken_at,media_kind,companion
+                             FROM photos WHERE media_kind!='live_motion' ORDER BY id""").fetchall()
         photos = {}
         fingerprints = []
         calculated = 0
@@ -103,7 +105,7 @@ def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4, progress=N
                                (photo_id, stat.st_size, stat.st_mtime_ns, sha, dhash))
                     db.commit()  # Hashing large videos must not hold the SQLite writer.
                     calculated += 1
-                photos[photo_id] = {"id": photo_id, "name": row["name"], "path": str(path)}
+                photos[photo_id] = {**dict(row), "path": str(path)}  # What a review card shows.
                 fingerprints.append((photo_id, sha, int(dhash, 16) if dhash else None))
             except (OSError, PermissionError):
                 continue
