@@ -24,34 +24,77 @@ struct ExportedPhotoResource {
 final class PhotoLibraryTracker: NSObject, PHPhotoLibraryChangeObserver, @unchecked Sendable {
     private let lock = NSLock()
     private var result: PHFetchResult<PHAsset>?
-    private var dirty = true
+    private var cache = DiscoveryCacheState()
+    private var observing = true
+    private let onChange: @Sendable () -> Void
 
-    override init() {
+    init(onChange: @escaping @Sendable () -> Void = {}) {
+        self.onChange = onChange
         super.init()
         PHPhotoLibrary.shared().register(self)
     }
-    deinit { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+    deinit { if observing { PHPhotoLibrary.shared().unregisterChangeObserver(self) } }
+    func invalidate() {
+        lock.lock()
+        cache.invalidate()
+        lock.unlock()
+    }
+    func stopObserving() {
+        lock.lock()
+        let wasObserving = observing
+        observing = false
+        result = nil
+        cache.invalidate()
+        lock.unlock()
+        if wasObserving { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+    }
     func photoLibraryDidChange(_ changeInstance: PHChange) {
         lock.lock()
-        defer { lock.unlock() }
+        guard observing else { lock.unlock(); return }
+        var changed = false
         if let result, let details = changeInstance.changeDetails(for: result) {
             self.result = details.fetchResultAfterChanges
-            dirty = true
-        } else if result == nil { dirty = true }
+            cache.invalidate()
+            changed = true
+        } else if result == nil { cache.invalidate(); changed = true }
+        lock.unlock()
+        if changed { onChange() }
     }
-    private func snapshot() -> PHFetchResult<PHAsset>? {
+    private func snapshot(receiver: String, authorization: Int) -> (PHFetchResult<PHAsset>, DiscoveryCacheState.Ticket)? {
+        lock.lock()
+        guard observing, let ticket = cache.begin(context: .init(receiver: receiver, authorization: authorization),
+                                                  now: Date().timeIntervalSince1970) else { lock.unlock(); return nil }
+        lock.unlock()
+        // Do not hold our notification lock while making a PhotoKit fetch.
+        // Any notification during this fetch invalidates the reserved ticket.
+        let fetched = PhotoSource.allAssets()
+        lock.lock()
+        guard observing else { lock.unlock(); return nil }
+        result = fetched
+        lock.unlock()
+        return (fetched, ticket)
+    }
+    private func finish(_ ticket: DiscoveryCacheState.Ticket, succeeded: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        guard dirty else { return nil }
-        // Refresh also reconciles selected-library permission changes.
-        result = PhotoSource.allAssets()
-        dirty = false
-        return result
+        if succeeded { cache.finish(ticket, now: Date().timeIntervalSince1970) }
+        else { cache.fail(ticket) }
     }
-    func reconcile(queue: AssetSyncQueue, receiver: String) async throws -> Int? {
+    func isCurrent(receiver: String, authorization: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return observing && cache.isCurrent(context: .init(receiver: receiver, authorization: authorization),
+                                             now: Date().timeIntervalSince1970)
+    }
+    func reconcile(queue: AssetSyncQueue, receiver: String, authorization: Int) async throws -> Int? {
+        // Most small automatic batches need neither a fetch nor a detached task.
+        if isCurrent(receiver: receiver, authorization: authorization) { return nil }
         // Scanning 100k metadata entries must not block SwiftUI's main actor.
         let job = Task.detached { [self] () async throws -> Int? in
-            guard let snapshot = self.snapshot() else { return nil }
+            try Task.checkCancellation()
+            guard let (snapshot, ticket) = self.snapshot(receiver: receiver, authorization: authorization) else { return nil }
+            var succeeded = false
+            defer { self.finish(ticket, succeeded: succeeded) }
             let generation = UUID().uuidString
             let now = Date().timeIntervalSince1970
             var batch: [QueueAsset] = []
@@ -66,6 +109,8 @@ final class PhotoLibraryTracker: NSObject, PHPhotoLibraryChangeObserver, @unchec
             try await queue.discover(batch, receiver: receiver, generation: generation, now: now)
             try Task.checkCancellation()
             try await queue.finishDiscovery(receiver: receiver, generation: generation)
+            try Task.checkCancellation()
+            succeeded = true
             return snapshot.count
         }
         return try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }

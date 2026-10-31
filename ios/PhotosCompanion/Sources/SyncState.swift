@@ -39,10 +39,14 @@ final class SyncState: ObservableObject {
     @Published private(set) var lastError = ""
     @Published private(set) var schedulingError = ""
     @Published private(set) var lastCompleted: Date?
+    @Published private(set) var lastSuccessfulBatch: Date?
+    @Published private(set) var remainingAssets: Int?
+    @Published private(set) var snapshotNeedsRefresh = true
 
     let deviceId: String
     private var checkpoint: CheckpointStore?
     private var assetQueue: AssetSyncQueue?
+    private var libraryTracker: PhotoLibraryTracker?
     private var operationTask: Task<Bool, Never>?
     private var automaticTask: Task<Bool, Never>?
 
@@ -54,12 +58,13 @@ final class SyncState: ObservableObject {
         deviceId = persistedId ?? UUID().uuidString
         if persistedId == nil { settings.set(deviceId, forKey: deviceIdKey) }
         isPaired = KeychainStore.loadToken() != nil && settings.string(forKey: "pairedServerURL") != nil && settings.string(forKey: "receiverID") != nil
-        lastCompleted = settings.object(forKey: "lastCompleted") as? Date
         do { checkpoint = try CheckpointStore(); assetQueue = try AssetSyncQueue() }
         catch { lastError = "Cannot open local sync checkpoints: \(error.localizedDescription)" }
+        loadSyncHistory(receiver: isPaired ? settings.string(forKey: "receiverID") : nil)
     }
 
     func pair(masterToken: String) async {
+        guard !isRunning else { lastError = "Wait for the current sync to stop before pairing"; return }
         guard !masterToken.isEmpty else { lastError = "Enter Windows pairing token"; return }
         do {
             let client = try SyncAPI(serverURL: serverURL, wifiOnly: wifiOnly)
@@ -68,11 +73,34 @@ final class SyncState: ObservableObject {
             try KeychainStore.saveToken(reply.device_token)
             settings.set(client.origin, forKey: "pairedServerURL")
             settings.set(reply.receiver_id, forKey: "receiverID")
+            libraryTracker?.invalidate()
+            loadSyncHistory(receiver: reply.receiver_id)
             isPaired = true
             lastError = ""
             progress = "Paired successfully. You can start original-quality sync."
             if automatic { scheduleBackground() }
         } catch { lastError = error.localizedDescription }
+    }
+
+    private func historyKey(_ field: String, receiver: String) -> String {
+        "syncHistoryV2.\(receiver).\(field)"
+    }
+
+    private func loadSyncHistory(receiver: String?) {
+        lastCompleted = receiver.flatMap { settings.object(forKey: historyKey("snapshotCompleted", receiver: $0)) as? Date }
+        lastSuccessfulBatch = receiver.flatMap { settings.object(forKey: historyKey("batchCompleted", receiver: $0)) as? Date }
+        totalAssets = 0
+        markProgressUnknown()
+    }
+
+    private func markProgressUnknown() {
+        remainingAssets = nil
+        snapshotNeedsRefresh = true
+    }
+
+    func librarySelectionMayHaveChanged() {
+        libraryTracker?.invalidate()
+        markProgressUnknown()
     }
 
     func scheduleBackground() {
@@ -86,6 +114,9 @@ final class SyncState: ObservableObject {
         settings.removeObject(forKey: "pairedServerURL")
         settings.removeObject(forKey: "receiverID")
         KeychainStore.removeToken()
+        libraryTracker?.stopObserving()
+        libraryTracker = nil
+        loadSyncHistory(receiver: nil)
         isPaired = false
         progress = "Disconnected locally. Revoke device in Windows to invalidate old tokens."
     }
@@ -99,8 +130,9 @@ final class SyncState: ObservableObject {
     }
 
     func syncNow(maxAssets: Int = Int.max) async -> Bool {
-        guard !isRunning else { return false }
+        guard !isRunning && maxAssets > 0 else { return false }
         isRunning = true
+        markProgressUnknown()
         let task = Task { await self.performSync(maxAssets: maxAssets) }
         operationTask = task
         defer { isRunning = false; operationTask = nil }
@@ -132,16 +164,27 @@ final class SyncState: ObservableObject {
             }
             try await BackgroundChunkUploader.shared.waitForPreviousTasks()
             try PhotoSource.cleanAbandonedExports()
-            let tracker = PhotoLibraryTracker()
+            if libraryTracker == nil {
+                libraryTracker = PhotoLibraryTracker { [weak self] in
+                    Task { @MainActor [weak self] in self?.markProgressUnknown() }
+                }
+            }
+            guard let tracker = libraryTracker else { throw CocoaError(.fileReadUnknown) }
+            // A user-requested full sync refreshes metadata even without a notification.
+            if maxAssets == Int.max { tracker.invalidate() }
+            progress = "Checking your Photos selection…"
             let passStarted = Date().timeIntervalSince1970
             var jobs: [QueueAsset] = []
             var passHadFailure = false
             while processedAssets < maxAssets {
                 try Task.checkCancellation()
-                if let count = try await tracker.reconcile(queue: assetQueue, receiver: receiver) {
+                let access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+                guard access == .authorized || access == .limited else { throw CocoaError(.fileReadNoPermission) }
+                if let count = try await tracker.reconcile(queue: assetQueue, receiver: receiver, authorization: access.rawValue) {
                     totalAssets = count
                     jobs.removeAll() // Re-select new/changed assets ahead of the backlog.
                 }
+                try Task.checkCancellation()
                 if jobs.isEmpty {
                     jobs = try await assetQueue.next(receiver: receiver, passStarted: passStarted,
                                                      limit: min(20, maxAssets - processedAssets))
@@ -174,7 +217,8 @@ final class SyncState: ObservableObject {
                     try Task.checkCancellation()
                     let access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
                     guard access == .authorized || access == .limited else { throw CocoaError(.fileReadNoPermission) }
-                    guard isPaired, client.origin == settings.string(forKey: "pairedServerURL") else { throw SyncAPIError.notPaired }
+                    guard isPaired, receiver == settings.string(forKey: "receiverID"),
+                          client.origin == settings.string(forKey: "pairedServerURL") else { throw SyncAPIError.notPaired }
                     do {
                         if let saved = try checkpoint.completed(resource.failureKey, receiver: receiver, version: resource.assetKey),
                            try await client.verify(resource, checkpoint: saved, receiver: receiver, token: token) {
@@ -216,16 +260,37 @@ final class SyncState: ObservableObject {
                     passHadFailure = true
                 }
             }
+            try Task.checkCancellation()
             let remaining = try await assetQueue.remaining(receiver: receiver)
-            if remaining == 0 {
-                lastCompleted = Date()
-                settings.set(lastCompleted, forKey: "lastCompleted")
+            let generation = try await assetQueue.snapshotGeneration(receiver: receiver)
+            try Task.checkCancellation()
+            guard isPaired, receiver == settings.string(forKey: "receiverID"),
+                  client.origin == settings.string(forKey: "pairedServerURL") else { throw SyncAPIError.notPaired }
+            let current = tracker.isCurrent(receiver: receiver,
+                authorization: PHPhotoLibrary.authorizationStatus(for: .readWrite).rawValue)
+            remainingAssets = current ? remaining : nil
+            snapshotNeedsRefresh = !current
+            if !passHadFailure && current {
+                if processedAssets > 0 {
+                    let now = Date()
+                    lastSuccessfulBatch = now
+                    settings.set(now, forKey: historyKey("batchCompleted", receiver: receiver))
+                }
+                if remaining == 0, let generation,
+                   settings.string(forKey: historyKey("completedGeneration", receiver: receiver)) != generation {
+                    let now = Date()
+                    lastCompleted = now
+                    settings.set(now, forKey: historyKey("snapshotCompleted", receiver: receiver))
+                    settings.set(generation, forKey: historyKey("completedGeneration", receiver: receiver))
+                }
             }
-            progress = "Checked \(processedAssets) assets; sent \(uploadedResources) originals; \(remaining) pending or failed."
+            let backlog = current ? "\(remaining) pending or failed." : "Photos changed; backlog needs refreshing."
+            progress = "Checked \(processedAssets) assets; sent \(uploadedResources) originals; " + backlog
             // Reaching this opportunity's budget is normal progress, not a failed
             // BGProcessingTask. Only the full snapshot updates lastCompleted.
-            return !passHadFailure
+            return !passHadFailure && current
         } catch {
+            markProgressUnknown()
             lastError = error.localizedDescription
             progress = Task.isCancelled ? "Sync cancelled safely; committed chunks remain resumable." : "Pass interrupted; reconnect and retry."
             return false

@@ -1,5 +1,16 @@
 # Claude review handoff
 
+## Latest: remaining P2 discovery/progress follow-up
+
+Read [DISCOVERY_PROGRESS_FIXES.md](DISCOVERY_PROGRESS_FIXES.md) first. GitHub had
+no newer review targeting `c62f97c` when this work began; the three earlier P1s
+were already repaired. This delta addresses the remaining unconditional
+per-pass discovery cost and the old bounded-batch progress wording. Focus on
+process-local reuse, cold-start/context/permission invalidation, notification
+and cancellation revisions, queue generation checks and receiver-scoped dates.
+Prepared Swift XCTest cases are **not executed on Windows**; the performance and
+native acceptance gates remain open. Earlier reports below are historical.
+
 ## Latest: three PR #3 blockers
 
 Read [PR3_BLOCKER_FIXES.md](PR3_BLOCKER_FIXES.md) for the latest response to the

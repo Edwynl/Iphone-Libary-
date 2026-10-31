@@ -56,14 +56,28 @@ struct ContentView: View {
                     LabeledContent("Photo library", value: "\(sync.totalAssets) assets")
                     LabeledContent("Checked this pass", value: "\(sync.processedAssets)")
                     LabeledContent("Uploaded originals", value: "\(sync.uploadedResources)")
+                    if let remaining = sync.remainingAssets {
+                        LabeledContent("Pending or failed", value: "\(remaining) assets")
+                    } else {
+                        LabeledContent("Pending or failed", value: "Not checked yet")
+                    }
                     Text(sync.progress).font(.subheadline)
                     if !sync.lastError.isEmpty {
                         Text(sync.lastError).font(.footnote).foregroundStyle(.red)
                             .accessibilityIdentifier("sync-error")
                     }
-                    if let date = sync.lastCompleted {
-                        LabeledContent("Last successful pass") { Text(date, style: .date) }
+                    if let date = sync.lastSuccessfulBatch {
+                        LabeledContent("Last successful batch") { Text(date, style: .relative) }
                     }
+                    if let date = sync.lastCompleted {
+                        LabeledContent("Last snapshot fully backed up") { Text(date, style: .relative) }
+                    }
+                    if sync.snapshotNeedsRefresh {
+                        Text("Current Photos selection needs checking. A previous completion date does not mean new changes are backed up.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Snapshot completion covers the Photos selection visible at that time; it does not mean every Windows file was freshly rechecked in this batch.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Button {
                         Task { await sync.syncNow() }
                     } label: {

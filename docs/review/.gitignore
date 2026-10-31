@@ -20,6 +20,7 @@ next-restart-tests.log
 snapshot-initial-tests.log
 snapshot-contract-tests.log
 snapshot-swift-syntax.log
+discovery-swift-syntax.log
 fix-test-state/
 fix-gui-state/
 fix-large-transfer-data/

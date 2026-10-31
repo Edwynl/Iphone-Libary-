@@ -119,6 +119,17 @@ status and management responsive. Bridge waits are bounded and accept cancellati
 
 ## Native iPhone verification boundary
 
+The iPhone now retains its PhotoKit tracker for the process lifetime and reuses
+successful discovery for unchanged automatic batches. A locked revision ticket
+prevents a notification during discovery from being cleared by stale completion;
+failed/cancelled discovery cannot authorize cache reuse. Full refresh is still
+required on cold start, manual full sync, foreground activation, context changes
+or six-hour eligibility expiry. This removes unconditional per-pass scanning
+within a surviving unchanged process; it is not persistent incremental history
+or evidence of battery savings. Progress distinguishes batches, current backlog
+and receiver-scoped snapshot completion. See
+[current follow-up](review/DISCOVERY_PROGRESS_FIXES.md) for tests and limitations.
+
 The repaired Swift sources have not been compiled by Xcode or run on an iPhone.
 They include alternatePhoto resources, receiver-scoped verified checkpoints,
 per-resource failure records, cancellation-aware PhotoKit streaming and URLSession

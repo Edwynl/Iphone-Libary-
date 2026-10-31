@@ -60,4 +60,20 @@ final class AssetSyncQueueTests: XCTestCase {
         let remaining = try await reopened.remaining(receiver: "r")
         XCTAssertEqual(remaining, 0)
     }
+
+    func testTwentySuccessfulAssetsDoNotCompleteAHundredAssetSnapshot() async throws {
+        try await withQueue { queue in
+            let assets = (0..<100).map { QueueAsset(identifier: "a\($0)", version: "v1", changedAt: Double($0)) }
+            try await queue.discover(assets, receiver: "r", generation: "current", now: 1)
+            try await queue.finishDiscovery(receiver: "r", generation: "current")
+            for asset in assets.prefix(20) { try await queue.complete(asset, receiver: "r", now: 2) }
+            let partial = try await queue.remaining(receiver: "r")
+            XCTAssertEqual(partial, 80)
+            let generation = try await queue.snapshotGeneration(receiver: "r")
+            XCTAssertEqual(generation, "current")
+            for asset in assets.dropFirst(20) { try await queue.complete(asset, receiver: "r", now: 3) }
+            let complete = try await queue.remaining(receiver: "r")
+            XCTAssertEqual(complete, 0)
+        }
+    }
 }

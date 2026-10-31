@@ -11,6 +11,7 @@ struct PhotosCompanionApp: App {
             ContentView()
                 .environmentObject(sync)
                 .onChange(of: phase) { _, current in
+                    if current == .active { sync.librarySelectionMayHaveChanged() }
                     if current == .active && sync.automatic && sync.isPaired {
                         sync.scheduleBackground()
                         Task { await sync.automaticPass(maxAssets: 100) }

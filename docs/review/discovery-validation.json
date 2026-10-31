@@ -1,0 +1,40 @@
+{
+  "reviewed_baseline": "c62f97c098afe89fd9bd30579eef83ee8323c93d",
+  "latest_independent_review_at_start": "3886da6e26e6da7a2b8806bd378828998ccbd560",
+  "pytest_passed": 100,
+  "pytest_skipped": 1,
+  "pytest_failures": 0,
+  "pytest_errors": 0,
+  "pytest_seconds": 44.971,
+  "python_queue_sql_tests": 6,
+  "swift_grammar_files": 15,
+  "prepared_native_xctests": 9,
+  "native_xctests_executed": false,
+  "xcode_photokit_device_energy_validation": "Not Verified",
+  "windows_engine_and_winui_sources_changed": false,
+  "windows_build_repeated_this_delta": false,
+  "cache_scope": "Process-local completed discovery only; no persistent PhotoKit history token",
+  "evidence_working_tree_sha256": {
+    "discovery-pytest.log": "a83278a1f9fb0098bc2c9fc460c13f8c23fcd29a3821ccdf7748a5d8bbdf0f4e",
+    "discovery-pytest.xml": "17f35f826b9ad6f5ae3ab1421dfa2ced6b990e6f878e9a11baa0ca20017754ed",
+    "discovery-swift-syntax.json": "45b9b6fc4e7a78e5fe761ccad342f318efc45955728fd666bc3455db21b5ac1f",
+    "discovery-static-check.log": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0"
+  },
+  "swift_working_tree_sha256": {
+    "ios/PhotosCompanion/Package.swift": "d368328fbf400fd057ea70a9a341b1f46ba986dbfadd676a93409487e0ddabf0",
+    "ios/PhotosCompanion/QueueTests/AssetSyncQueueTests.swift": "61418cfad79a54513b82a7c3fe9a70ae5098bed2c9d80c772ed6efffb407f108",
+    "ios/PhotosCompanion/QueueTests/DiscoveryCacheStateTests.swift": "a598055364e8baa84720061f46e8e4087240aac01e5844da6245d27978ac7400",
+    "ios/PhotosCompanion/Sources/AssetSyncQueue.swift": "76570941d5a8d6721dbb68c0f2c799a5c3c2c679bae73aa3ca2efde552aa2dce",
+    "ios/PhotosCompanion/Sources/BackgroundChunkUploader.swift": "e103a7d8ac36c1bb9e99466d8428ab0a507be3d8bfb14272a9a1fe65d8771b0a",
+    "ios/PhotosCompanion/Sources/BackgroundScheduler.swift": "8e285010e4ba61db0b4323725d89932184bd01ec6c4ec3526ddc45efee769d64",
+    "ios/PhotosCompanion/Sources/CancellationGate.swift": "24c9deecda0d74b95d0e2be8307220dacad878a226d946acf8746d85238e1cf4",
+    "ios/PhotosCompanion/Sources/CheckpointStore.swift": "e19e9efc134e3f9c2a20b334e14c003cef532d24a68eb339d5d1dfc832e7fc22",
+    "ios/PhotosCompanion/Sources/ContentView.swift": "45509432ace4fc51a0f92c664e17288e8bb2f3453f570c0744df282067e97439",
+    "ios/PhotosCompanion/Sources/DiscoveryCacheState.swift": "3fc423de62c934c6170e645bf41db61fd1c1d4e339af6b0a24a8a455587493e5",
+    "ios/PhotosCompanion/Sources/KeychainStore.swift": "ea231baa6c4ea98b2aa87b18367af2bdbb2ce0fb97981e91c999515bb9ad050d",
+    "ios/PhotosCompanion/Sources/PhotosCompanionApp.swift": "93aadb86c83e49957c0e60b6cefb721774f66ee6c00bc00a36d8bddfa73a7f72",
+    "ios/PhotosCompanion/Sources/PhotoSource.swift": "911bd3696b9ee1db8f0c2733a5b94b0eed1694e88cefaa33f158f200c3fa5bcd",
+    "ios/PhotosCompanion/Sources/SyncAPI.swift": "446fbdc686982afe7a90dd2fdec9ba9c17b7d1c6a57220e9fc3368308b7dfea2",
+    "ios/PhotosCompanion/Sources/SyncState.swift": "cac78d1f90d58751b5d7e7b057a8571f0f90b2df598d3c045b6d1cba614008f4"
+  }
+}

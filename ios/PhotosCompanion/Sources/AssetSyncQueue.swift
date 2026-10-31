@@ -64,6 +64,9 @@ actor AssetSyncQueue {
     SELECT COUNT(*) FROM asset_queue WHERE receiver=?
       AND generation=(SELECT generation FROM queue_snapshot WHERE receiver=?) AND state<>'complete'
     """
+    static let snapshotSQL = """
+    SELECT generation FROM queue_snapshot WHERE receiver=?
+    """
 
     init(url: URL? = nil) throws {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -154,5 +157,15 @@ actor AssetSyncQueue {
         defer { sqlite3_finalize(query) }
         guard sqlite3_step(query) == SQLITE_ROW else { throw NSError(domain: "AssetSyncQueue", code: 6) }
         return Int(sqlite3_column_int64(query, 0))
+    }
+    func snapshotGeneration(receiver: String) throws -> String? {
+        let query = try statement(Self.snapshotSQL, [receiver])
+        defer { sqlite3_finalize(query) }
+        let result = sqlite3_step(query)
+        if result == SQLITE_DONE { return nil }
+        guard result == SQLITE_ROW, let value = sqlite3_column_text(query, 0) else {
+            throw NSError(domain: "AssetSyncQueue", code: 6)
+        }
+        return String(cString: value)
     }
 }

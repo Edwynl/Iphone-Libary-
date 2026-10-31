@@ -77,3 +77,29 @@ def test_100000_metadata_entries_new_import_has_priority(record_property):
     assert pending(db, limit=18)[0][0] == 'fresh-with-old-date'
     record_property('sqlite_metadata_seconds', round(time.perf_counter() - started, 3))
     assert db.execute(SQL['remainingSQL'], ('r', 'r')).fetchone()[0] == 100001
+
+
+def test_small_successful_batch_is_not_a_complete_library_snapshot():
+    db = database()
+    assets = [('asset-' + str(i), 'v1', i) for i in range(100)]
+    discover(db, assets, generation='full-selection')
+    for ident, version, _ in assets[:20]:
+        db.execute(SQL['completeSQL'], (1100, 'r', ident, version))
+    assert db.execute(SQL['remainingSQL'], ('r', 'r')).fetchone()[0] == 80
+    assert db.execute(SQL['snapshotSQL'], ('r',)).fetchone()[0] == 'full-selection'
+    assert db.execute(SQL['snapshotSQL'], ('another-receiver',)).fetchone() is None
+    before = db.total_changes
+    pending(db)
+    assert db.total_changes == before  # Queue reads do not rediscover/reset the snapshot.
+    for ident, version, _ in assets[20:]:
+        db.execute(SQL['completeSQL'], (1200, 'r', ident, version))
+    assert db.execute(SQL['remainingSQL'], ('r', 'r')).fetchone()[0] == 0
+
+
+def test_incomplete_discovery_does_not_provide_a_completed_generation():
+    db = database()
+    discover(db, [('a', 'v1', 1)], generation='interrupted', finish=False)
+    assert db.execute(SQL['snapshotSQL'], ('r',)).fetchone() is None
+    discover(db, [('a', 'v1', 1), ('b', 'v1', 2)], generation='retry')
+    assert db.execute(SQL['snapshotSQL'], ('r',)).fetchone()[0] == 'retry'
+    assert db.execute(SQL['remainingSQL'], ('r', 'r')).fetchone()[0] == 2

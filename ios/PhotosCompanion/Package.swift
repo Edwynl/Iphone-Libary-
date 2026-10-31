@@ -11,7 +11,7 @@ let package = Package(
             "BackgroundChunkUploader.swift", "BackgroundScheduler.swift", "CancellationGate.swift",
             "CheckpointStore.swift", "ContentView.swift", "Info.plist", "KeychainStore.swift",
             "PhotoSource.swift", "PhotosCompanionApp.swift", "SyncAPI.swift", "SyncState.swift"
-        ], sources: ["AssetSyncQueue.swift"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        ], sources: ["AssetSyncQueue.swift", "DiscoveryCacheState.swift"], linkerSettings: [.linkedLibrary("sqlite3")]),
         .testTarget(name: "PhotosSyncQueueTests", dependencies: ["PhotosSyncQueue"], path: "QueueTests")
     ]
 )
