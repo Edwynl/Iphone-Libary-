@@ -42,6 +42,9 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        // Content runs under the caption buttons so the acrylic backdrop reaches the top edge.
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
         InitializeBoxSelection();
         PhotoGrid.ItemsSource = _photos;
         PhotoGrid.Loaded += (_, _) =>
@@ -636,6 +639,8 @@ public sealed partial class MainWindow : Window
     private void PhotoGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (RecycleButton is null) return;
+        var selected = PhotoGrid.SelectedItems.OfType<PhotoCard>().ToHashSet();
+        foreach (var card in _photos) card.IsSelected = selected.Contains(card);
         var count = _selecting ? PhotoGrid.SelectedItems.Count : 0;
         RecycleButton.Content = $"移到回收站 ({count})";
         RecycleButton.IsEnabled = !_working && count > 0;

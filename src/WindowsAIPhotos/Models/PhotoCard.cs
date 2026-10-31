@@ -1,9 +1,27 @@
+using System.ComponentModel;
 using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace WindowsAIPhotos.Models;
 
-public sealed class PhotoCard
+public sealed class PhotoCard : INotifyPropertyChanged
 {
+    private bool _isSelected;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    // Mirrors the grid's selection; the item template draws the check (the grid's own frame is off).
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (_isSelected == value) return;
+            _isSelected = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedOpacity)));
+        }
+    }
+    public double SelectedOpacity => _isSelected ? 1 : 0;
+
     public required string Path { get; init; }
     public required string FileName { get; init; }
     public string Subtitle { get; init; } = "";
