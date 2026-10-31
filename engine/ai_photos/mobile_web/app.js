@@ -174,5 +174,13 @@ el('upload').addEventListener('click', async () => {
   await reload();
 });
 
-// The token is kept on this iPhone after a successful connection; a rejected one is forgotten.
-try { const saved = localStorage.getItem('pairingToken'); if (saved) connect(saved).catch(() => remember('')); } catch (e) {}
+// A QR code from Windows carries the token in the fragment (#token=…), which never reaches the
+// server; it is taken out of the address at once. Otherwise the token kept on this iPhone is
+// used, and a rejected one is forgotten.
+const linked = new URLSearchParams(location.hash.slice(1)).get('token');
+if (linked) history.replaceState(null, '', location.pathname);
+let saved = null;
+try { saved = localStorage.getItem('pairingToken'); } catch (e) {}
+if (linked || saved) connect(linked || saved).catch(e => {
+  remember(''); if (linked) el('connection').textContent = 'Connection failed: ' + e.message;
+});
