@@ -103,7 +103,13 @@ public sealed class IPhoneImporter : IDisposable
                 status($"正在从 iPhone 复制 {done.Count + 1:N0}/{wanted.Count:N0}：{file.Name}");
                 // Subfolders keep IMG_0001 from 100APPLE and 101APPLE apart.
                 var relative = Path.Combine(file.Folder, file.Name);
-                try { CopyStream(file.IdList, Path.Combine(staging, relative)); }
+                try
+                {
+                    var target = Path.Combine(staging, relative);
+                    CopyStream(file.IdList, target);
+                    // Keep the phone's time, as Explorer does: undated images sort by it.
+                    File.SetLastWriteTimeUtc(target, DateTimeOffset.Parse(file.Date).UtcDateTime);
+                }
                 catch (Exception ex) when (ex is IOException or COMException or UnauthorizedAccessException)
                 {
                     interruption = ex;  // E.g. unplugged: still keep everything copied so far.

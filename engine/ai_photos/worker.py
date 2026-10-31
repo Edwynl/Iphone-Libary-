@@ -138,7 +138,8 @@ class Worker:
             elif action == "organize":
                 data = virtual_albums(self.catalog)
             elif action == "browse":
-                data = {"photos": self.catalog.browse(params.get("limit", 120), params.get("offset", 0), params.get("media_type", "all"))}
+                data = {"photos": self.catalog.browse(params.get("limit", 120), params.get("offset", 0),
+                                                      params.get("media_type", "all"), params.get("order", "newest"))}
             elif action == "search":
                 encoder = self.encoder if self.encoder.installed else None
                 data = self.catalog.search(params.get("query", ""), params.get("limit", 120), encoder)

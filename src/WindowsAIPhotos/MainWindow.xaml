@@ -65,6 +65,9 @@
           <ComboBox x:Name="MediaFilter" Header="媒体分类 / Media" SelectedIndex="0" SelectionChanged="MediaFilter_SelectionChanged" HorizontalAlignment="Stretch">
             <ComboBoxItem Content="全部 / All"/><ComboBoxItem Content="照片 / Photos"/><ComboBoxItem Content="视频 / Videos"/><ComboBoxItem Content="截图 / Screenshots"/>
           </ComboBox>
+          <ComboBox x:Name="SortOrder" Header="排序 / Sort" SelectedIndex="0" SelectionChanged="MediaFilter_SelectionChanged" HorizontalAlignment="Stretch">
+            <ComboBoxItem Content="最新在前 / Newest first"/><ComboBoxItem Content="最早在前 / Oldest first"/>
+          </ComboBox>
           <TextBlock Text="SOURCE FOLDERS / 来源目录" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
           <Button x:Name="AddFolderButton" Click="AddFolderButton_Click"
                   HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">

@@ -38,6 +38,9 @@ public sealed partial class MainWindow : Window
     private static readonly string[] MediaTitles = { "All media / 全部", "Photos / 照片", "Videos / 视频", "Screenshots / 截图" };
     private int MediaIndex => Math.Max(0, MediaFilter.SelectedIndex);
     private string MediaType => MediaTypes[MediaIndex];
+    // In SortOrder order; by capture date, else file time.
+    private static readonly string[] SortOrders = { "newest", "oldest" };
+    private string Order => SortOrders[Math.Max(0, SortOrder.SelectedIndex)];
 
     public MainWindow()
     {
@@ -139,7 +142,7 @@ public sealed partial class MainWindow : Window
         if (reset) _offset = 0;
         // A newer browse or search supersedes this page; never append it to their results.
         int version = reset ? ++_browseVersion : _browseVersion;
-        var result = await CallAsync("browse", new { limit = PageSize, offset = _offset, media_type = MediaType });
+        var result = await CallAsync("browse", new { limit = PageSize, offset = _offset, media_type = MediaType, order = Order });
         if (version != _browseVersion) return;
         _isSearch = false;
         DisplayPhotos(result.GetProperty("photos"), append: !reset);

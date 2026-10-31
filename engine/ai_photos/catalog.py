@@ -26,6 +26,14 @@ _VISIBLE = "media_kind!='live_motion'"
 _MEDIA_FILTERS = {"all": _VISIBLE, "photo": "media_kind='photo'", "video": "media_kind='video'",
                   "screenshot": "media_kind='photo' AND screenshot=1"}
 _COLUMNS = "id,path,name,thumb_path,mtime_ns,taken_at,width,height,error,media_kind,companion"
+# Local "YYYY-MM-DD HH:MM:SS" to sort by. taken_at is EXIF local time ("2026:09:19 16:47:41") for
+# photos and ISO UTC for videos; without it (saved images, screenshots) the file time stands in.
+_SORT_TIME = """COALESCE(CASE
+    WHEN taken_at GLOB '[0-9][0-9][0-9][0-9]:[0-9][0-9]:[0-9][0-9] *'
+        THEN replace(substr(taken_at,1,10),':','-') || substr(taken_at,11,9)
+    WHEN taken_at GLOB '[0-9][0-9][0-9][0-9]-*' THEN datetime(taken_at,'localtime') END,
+    datetime(mtime_ns/1000000000,'unixepoch','localtime'))"""
+_ORDERS = {"newest": "DESC", "oldest": "ASC"}
 _FILENAME_QUERY = re.compile(r"[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*")
 _SCREENSHOT_NAME = re.compile(r"screen[ _-]?shot|截图|截屏", re.IGNORECASE)
 
@@ -424,14 +432,16 @@ class PhotoCatalog:
         db.executemany("UPDATE photos SET screenshot=? WHERE id=?", marks)
         db.commit()
 
-    def browse(self, limit: int = 120, offset: int = 0, media_type: str = "all") -> list[dict]:
+    def browse(self, limit: int = 120, offset: int = 0, media_type: str = "all", order: str = "newest") -> list[dict]:
         if media_type not in _MEDIA_FILTERS:
             raise ValueError("Invalid media type")
-        where = _MEDIA_FILTERS[media_type]
+        if order not in _ORDERS:
+            raise ValueError("Invalid sort order")
+        where, direction = _MEDIA_FILTERS[media_type], _ORDERS[order]
         with self.connection() as db:
             rows = db.execute(f"""
                 SELECT {_COLUMNS} FROM photos
-                WHERE {where} ORDER BY mtime_ns DESC,id DESC LIMIT ? OFFSET ?
+                WHERE {where} ORDER BY {_SORT_TIME} {direction},id {direction} LIMIT ? OFFSET ?
             """, (max(1, min(int(limit), 300)), max(0, int(offset)))).fetchall()
             return [dict(row) for row in rows]
 
