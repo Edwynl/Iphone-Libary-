@@ -111,10 +111,12 @@ class SafeDirectory:
             chain = [*reversed(self.path.parents), self.path]
             if os.name == "nt":
                 for directory in chain:
-                    try:
-                        directory.mkdir()
-                    except FileExistsError:
-                        pass  # Includes a concurrent creator; the handle below validates it.
+                    # Never mkdir an existing path: a drive root raises WinError 5.
+                    if not directory.exists():
+                        try:
+                            directory.mkdir()
+                        except FileExistsError:
+                            pass  # A concurrent creator; the handle below validates it.
                     handle = _win_handle(directory, True)
                     self._stack.callback(_kernel.CloseHandle, handle)
                 # A normal directory must remain nonempty to prevent SET_REPARSE
