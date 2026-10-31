@@ -1,0 +1,15 @@
+C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\SyncManagement.cs(48,36): error CS0234: The type or namespace name 'FontWeights' does not exist in the namespace 'Windows.UI.Text' (are you missing an assembly reference?) [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\SyncManagement.cs(48,75): error CS0234: The type or namespace name 'FontWeights' does not exist in the namespace 'Windows.UI.Text' (are you missing an assembly reference?) [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+C:\Antigravity\Claude Project\Windows AI Photos\docs\review\nuget-packages\microsoft.windowsappsdk.winui\2.6.4\buildTransitive\Microsoft.UI.Xaml.Markup.Compiler.interop.targets(864,9): XamlCompiler warning WMC1509: No LocalAssembly parameter given during MarkupCompilePass2 for the currently building project.  This will likely cause type resolution errors for any types from the current project. [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+C:\Antigravity\Claude Project\Windows AI Photos\docs\review\nuget-packages\microsoft.windowsappsdk.winui\2.6.4\buildTransitive\Microsoft.UI.Xaml.Markup.Compiler.interop.targets(864,9): Xaml Internal Error error WMC9999: Object reference not set to an instance of an object. [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+
+Build FAILED.
+
+C:\Antigravity\Claude Project\Windows AI Photos\docs\review\nuget-packages\microsoft.windowsappsdk.winui\2.6.4\buildTransitive\Microsoft.UI.Xaml.Markup.Compiler.interop.targets(864,9): XamlCompiler warning WMC1509: No LocalAssembly parameter given during MarkupCompilePass2 for the currently building project.  This will likely cause type resolution errors for any types from the current project. [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\SyncManagement.cs(48,36): error CS0234: The type or namespace name 'FontWeights' does not exist in the namespace 'Windows.UI.Text' (are you missing an assembly reference?) [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\SyncManagement.cs(48,75): error CS0234: The type or namespace name 'FontWeights' does not exist in the namespace 'Windows.UI.Text' (are you missing an assembly reference?) [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+C:\Antigravity\Claude Project\Windows AI Photos\docs\review\nuget-packages\microsoft.windowsappsdk.winui\2.6.4\buildTransitive\Microsoft.UI.Xaml.Markup.Compiler.interop.targets(864,9): Xaml Internal Error error WMC9999: Object reference not set to an instance of an object. [C:\Antigravity\Claude Project\Windows AI Photos\src\WindowsAIPhotos\WindowsAIPhotos.csproj]
+    1 Warning(s)
+    3 Error(s)
+
+Time Elapsed 00:00:10.58

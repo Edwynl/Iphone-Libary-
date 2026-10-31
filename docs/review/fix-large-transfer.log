@@ -1,0 +1,6 @@
+{"bytes_acknowledged": 1073741824, "elapsed_sec": 7.8}
+{"server_restart_resume_offset": 2147483648}
+{"bytes_acknowledged": 2147483648, "elapsed_sec": 14.39}
+{"bytes_acknowledged": 3221225472, "elapsed_sec": 21.17}
+{"bytes_acknowledged": 4294967296, "elapsed_sec": 27.22}
+{"passed": true, "synthetic_file_bytes": 4294967313, "chunks": 513, "restart_resume_offset": 2147483648, "final_sha256": "e6c2056619e0dfe0fc5cb5ff42fd4ee077387e923c95d7bda88329cdf497704e", "status": "complete", "elapsed_sec": 37.24, "limits": "Loopback HTTP + synthetic MOV bytes only. Not a real MOV, PhotoKit, Tailscale or OS reboot test."}

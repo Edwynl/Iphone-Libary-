@@ -63,6 +63,8 @@ public sealed partial class MainWindow : Window
         PhotoCount.Text = $"{count:N0} photos";
         AiState.Text = installed ? $"Ready · {embedded:N0}/{count:N0} AI-indexed"
                                  : "Not installed · filename search only";
+        if (data.TryGetProperty("ai_error", out var aiError) && !string.IsNullOrEmpty(aiError.GetString()))
+            AiState.Text = "AI unavailable — repair/install: " + aiError.GetString();
         AiButton.IsEnabled = !installed && !_working;
         AiButton.Visibility = installed ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -88,7 +90,7 @@ public sealed partial class MainWindow : Window
             if (path.Length == 0) continue;
             var date = row.TryGetProperty("mtime_ns", out var element) && element.TryGetInt64(out var ns)
                 ? ns : 0;
-            _photos.Add(PhotoCard.Create(path, Str(row, "name"), Str(row, "thumb_path"), date));
+            _photos.Add(PhotoCard.Create(path, Str(row, "name"), Str(row, "thumb_path"), date, Str(row, "taken_at")));
         }
         EmptyState.Visibility = _photos.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Text = _folders.Count == 0 ? "Choose Add photo folder to begin."
@@ -299,13 +301,14 @@ public sealed partial class MainWindow : Window
             var data = await CallAsync("start_mobile", new { port = 8787 });
             var token = Str(data, "pairing_token");
             var command = Str(data, "tailscale_command");
-            await ShowMessageAsync("iPhone companion enabled",
+            await ShowMessageAsync("Background iPhone receiver enabled",
                 "Local: http://127.0.0.1:8787" + Environment.NewLine +
                 "From iPhone away from home: run this on Windows (Tailscale installed):" +
                 Environment.NewLine + command + Environment.NewLine + Environment.NewLine +
                 "Open the private HTTPS URL shown by Tailscale Serve on your iPhone." +
                 Environment.NewLine + Environment.NewLine +
                 "Pairing token (keep private): " + token + Environment.NewLine + Environment.NewLine +
+                "The receiver stays active when this window closes. Reopen Manage sync and choose Stop receiver to stop it. It does not auto-start after sign-out or reboot." + Environment.NewLine + Environment.NewLine +
                 "Install the iOS Photos Companion project on the iPhone, enter the private HTTPS URL and pairing token, then enable automatic sync. iOS schedules background opportunities; this is not real-time continuous sync.");
             await RefreshSyncSidebarAsync();
         }
@@ -324,19 +327,25 @@ public sealed partial class MainWindow : Window
             if (folder is null) return;
             SetBusy(true);
             var planned = await CallAsync("backup_local", new { target = folder.Path, apply = false });
+            if (!planned.GetProperty("complete").GetBoolean())
+            {
+                await ShowMessageAsync("Backup needs attention", "Some originals are stale, unavailable or unsafe. Scan/reconcile the library and reconnect source drives before backing up. Details: " + planned.GetProperty("issues").GetRawText());
+                return;
+            }
             var files = planned.GetProperty("files").GetInt32();
             var bytes = planned.GetProperty("bytes_planned").GetInt64();
             var dialog = new ContentDialog
             {
                 Title = "Back up original photos?",
-                Content = $"Destination: {folder.Path}\n{files:N0} indexed photos\nUp to {bytes / (1024.0 * 1024 * 1024):F2} GB planned.\nOnly copies. No deletion and no folder mirroring.",
+                Content = $"Destination: {folder.Path}\n{files:N0} original resource files\nUp to {bytes / (1024.0 * 1024 * 1024):F2} GB planned.\nOnly copies. No deletion and no folder mirroring.",
                 PrimaryButtonText = "Start backup",
                 CloseButtonText = "Cancel",
                 XamlRoot = Root.XamlRoot
             };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
             var done = await CallAsync("backup_local", new { target = folder.Path, apply = true });
-            await ShowMessageAsync("Backup finished", $"Copied: {done.GetProperty("copied").GetInt32()}\nUnchanged: {done.GetProperty("unchanged").GetInt32()}");
+            await ShowMessageAsync(done.GetProperty("complete").GetBoolean() ? "Backup verified" : "Backup incomplete",
+                $"Copied: {done.GetProperty("copied").GetInt32()}\nUnchanged: {done.GetProperty("unchanged").GetInt32()}\nIssues: {done.GetProperty("issues").GetRawText()}");
         }
         catch (Exception ex) { ShowError("Backup failed", ex); }
         finally { SetBusy(false); }

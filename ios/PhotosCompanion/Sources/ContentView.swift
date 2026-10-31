@@ -42,22 +42,42 @@ struct ContentView: View {
                     Toggle("Allow automatic background sync", isOn: $sync.automatic)
                         .disabled(!sync.isPaired)
                     Toggle("Wi-Fi only", isOn: $sync.wifiOnly)
+                    Text("Strict Wi-Fi mode reads local originals only because PhotoKit cannot prohibit cellular access per download. For iCloud-only originals, download them in Photos first, or turn this off to allow system iCloud retrieval and cellular transfer.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text("iOS schedules background opportunities; syncing may pause while the app is closed. Force quitting disables automatic relaunch. Open this app to complete an initial large library transfer.")
                         .font(.caption).foregroundStyle(.secondary)
+                    if !sync.schedulingError.isEmpty {
+                        Text(sync.schedulingError).font(.footnote).foregroundStyle(.red)
+                            .accessibilityIdentifier("background-scheduling-error")
+                    }
                 }
 
                 Section("Sync progress") {
                     LabeledContent("Photo library", value: "\(sync.totalAssets) assets")
                     LabeledContent("Checked this pass", value: "\(sync.processedAssets)")
                     LabeledContent("Uploaded originals", value: "\(sync.uploadedResources)")
+                    if let remaining = sync.remainingAssets {
+                        LabeledContent("Pending or failed", value: "\(remaining) assets")
+                    } else {
+                        LabeledContent("Pending or failed", value: "Not checked yet")
+                    }
                     Text(sync.progress).font(.subheadline)
                     if !sync.lastError.isEmpty {
                         Text(sync.lastError).font(.footnote).foregroundStyle(.red)
                             .accessibilityIdentifier("sync-error")
                     }
-                    if let date = sync.lastCompleted {
-                        LabeledContent("Last successful pass") { Text(date, style: .date) }
+                    if let date = sync.lastSuccessfulBatch {
+                        LabeledContent("Last successful batch") { Text(date, style: .relative) }
                     }
+                    if let date = sync.lastCompleted {
+                        LabeledContent("Last snapshot fully backed up") { Text(date, style: .relative) }
+                    }
+                    if sync.snapshotNeedsRefresh {
+                        Text("Current Photos selection needs checking. A previous completion date does not mean new changes are backed up.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Snapshot completion covers the Photos selection visible at that time; it does not mean every Windows file was freshly rechecked in this batch.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Button {
                         Task { await sync.syncNow() }
                     } label: {

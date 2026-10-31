@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "synthetic_file_bytes": 4294967313,
+  "chunks": 513,
+  "restart_resume_offset": 2147483648,
+  "final_sha256": "e6c2056619e0dfe0fc5cb5ff42fd4ee077387e923c95d7bda88329cdf497704e",
+  "status": "complete",
+  "elapsed_sec": 31.45,
+  "limits": "Loopback HTTP + synthetic MOV bytes only. Not a real MOV, PhotoKit, Tailscale or OS reboot test."
+}

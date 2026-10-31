@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import threading
-from pathlib import Path
+import hashlib
+import json
 from typing import Sequence
 
 import numpy as np
 from PIL import Image, ImageOps
 
-from .config import MODEL_ID, model_path
+from .config import MODEL_ID, MODEL_REVISION, model_path
+from .file_safety import SafeDirectory
 
 
 def _normalise(vector: np.ndarray) -> np.ndarray:
@@ -26,20 +28,46 @@ class Siglip2Encoder:
     this research bridge with a Windows ML backend for standalone distribution.
     """
 
-    model_id = MODEL_ID
+    model_id = MODEL_ID + '@' + MODEL_REVISION
 
     def __init__(self):
         self._lock = threading.Lock()
         self._processor = None
         self._model = None
         self._device = "cpu"
+        self.last_error = ''
+        self._verified_signature = None
+
+    def _artifacts_verified(self):
+        directory = model_path()
+        try:
+            lock_path = directory / 'model-lock.json'
+            manifest = json.loads(lock_path.read_text(encoding='utf-8'))
+            if manifest['repo'] != MODEL_ID or manifest['revision'] != MODEL_REVISION:
+                return False
+            files = manifest['files']
+            if 'config.json' not in files or 'model.safetensors' not in files:
+                return False
+            if any(not name or '/' in name or '\\' in name or ':' in name or name in {'.', '..'} for name in files):
+                return False
+            signature = (lock_path.stat().st_mtime_ns, tuple(
+                (name, (directory / name).stat().st_size, (directory / name).stat().st_mtime_ns) for name in sorted(files)))
+            if signature != self._verified_signature:
+                for name, expected in files.items():
+                    hashed = hashlib.sha256()
+                    with (directory / name).open('rb') as stream:
+                        for block in iter(lambda: stream.read(1024 * 1024), b''):
+                            hashed.update(block)
+                    if hashed.hexdigest() != expected:
+                        return False
+                self._verified_signature = signature
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
 
     @property
     def installed(self) -> bool:
-        directory = model_path()
-        return (directory / "config.json").is_file() and any(
-            (directory / name).is_file() for name in ("model.safetensors", "pytorch_model.bin")
-        )
+        return not self.last_error and self._artifacts_verified()
 
     def install(self) -> None:
         try:
@@ -53,32 +81,53 @@ class Siglip2Encoder:
         # Explicit action only; never download a model during ordinary scans.
         snapshot_download(
             repo_id=MODEL_ID,
+            revision=MODEL_REVISION,
             local_dir=str(target),
             allow_patterns=["*.json", "*.model", "*.txt", "*.safetensors"],
         )
+        manifest = {'repo': MODEL_ID, 'revision': MODEL_REVISION, 'files': {}}
+        for path in target.iterdir():
+            if path.suffix in {'.json', '.model', '.txt', '.safetensors'} and path.name != 'model-lock.json':
+                hashed = hashlib.sha256()
+                with path.open('rb') as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b''):
+                        hashed.update(block)
+                manifest['files'][path.name] = hashed.hexdigest()
+        with SafeDirectory(target) as directory:
+            directory.write('model-lock.json', json.dumps(manifest, sort_keys=True).encode())
+        self._model = None
+        self._processor = None
+        self.last_error = ''
+        self._verified_signature = None
         # Validate full model+processor load after download.
         self._ensure_loaded()
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
-        if not self.installed:
-            raise RuntimeError("AI model not installed. Choose Install AI in the app first.")
+        if not self._artifacts_verified():
+            raise RuntimeError("AI model missing or unverified. Choose Install AI to download/repair the pinned revision.")
         try:
             import torch
             from transformers import AutoProcessor, Siglip2Model
         except ImportError as exc:
+            self.last_error = str(exc)
             raise RuntimeError("AI dependencies missing. Run: pip install -r engine/requirements-ai.txt") from exc
         with self._lock:
             if self._model is not None:
                 return
             path = str(model_path())
-            processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-            model = Siglip2Model.from_pretrained(path, local_files_only=True)
-            self._device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = model.to(self._device).eval()
-            self._processor = processor
-            self._model = model
+            try:
+                processor = AutoProcessor.from_pretrained(path, local_files_only=True)
+                model = Siglip2Model.from_pretrained(path, local_files_only=True)
+                self._device = "cuda" if torch.cuda.is_available() else "cpu"
+                model = model.to(self._device).eval()
+                self._processor = processor
+                self._model = model
+                self.last_error = ''
+            except Exception as exc:
+                self.last_error = str(exc)
+                raise
 
     def embed_text(self, text: str) -> np.ndarray:
         self._ensure_loaded()

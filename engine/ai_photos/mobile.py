@@ -13,6 +13,7 @@ import re
 import secrets
 import tempfile
 import threading
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
@@ -21,13 +22,52 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .catalog import PhotoCatalog
 from .config import SUPPORTED_EXTENSIONS
 from .sync import CHUNK_BYTES, SyncFailure, SyncManager
+from .file_safety import SafeDirectory
+from .duplicates import sha256_file
 
 LOG = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    def __init__(self, *args, max_connections=16, socket_timeout=15, **kwargs):
+        if not 1 <= max_connections <= 128 or not 0 < socket_timeout <= 120:
+            raise ValueError('Invalid receiver connection limits')
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self.socket_timeout = socket_timeout
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self.socket_timeout)
+        return request, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            body = b'{"error":"Receiver busy; retry later","retryable":true}'
+            try:
+                request.sendall(b'HTTP/1.0 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: '
+                                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def default_inbox() -> Path:
-    return Path.home() / "Pictures" / "Windows AI Photos Imports"
+    override = os.environ.get('AI_PHOTOS_INBOX')
+    return Path(override).expanduser() if override else Path.home() / "Pictures" / "Windows AI Photos Imports"
 
 
 def _safe_name(value: str) -> str:
@@ -44,9 +84,11 @@ def _safe_name(value: str) -> str:
 class MobileServer:
     def __init__(self, catalog: PhotoCatalog, *, inbox: Path | None = None,
                  token: str | None = None, host: str = "127.0.0.1", port: int = 8787,
-                 sync_manager: SyncManager | None = None):
+                 sync_manager: SyncManager | None = None, max_connections=16, socket_timeout=15):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("Mobile service must bind to loopback; use Tailscale Serve for remote access")
+        if port in {8765, 8766}:
+            raise ValueError('Protected ports cannot host a photo receiver')
         self.catalog = catalog
         self.inbox = (inbox or default_inbox()).expanduser().resolve(strict=False)
         if catalog.home.resolve() == self.inbox or catalog.home.resolve() in self.inbox.parents:
@@ -55,8 +97,10 @@ class MobileServer:
         self.token = token or secrets.token_urlsafe(32)
         if len(self.token) < 32:
             raise ValueError("Use a strong 32+ character pairing token")
-        self.httpd = ThreadingHTTPServer((host, port), self._handler_class())
-        self.httpd.daemon_threads = True
+        self.httpd = BoundedHTTPServer((host, port), self._handler_class(),
+                                      max_connections=max_connections, socket_timeout=socket_timeout)
+        # Explicit Stop drains admitted writes before the receiver process exits.
+        self.httpd.daemon_threads = False
         self.httpd.mobile = self  # type: ignore[attr-defined]
         self.thread = None
 
@@ -71,7 +115,8 @@ class MobileServer:
         self.thread.start()
 
     def close(self):
-        self.httpd.shutdown()
+        if self.thread:
+            self.httpd.shutdown()
         self.httpd.server_close()
         if self.thread:
             self.thread.join(timeout=5)
@@ -85,16 +130,22 @@ class MobileServer:
                 sha256 TEXT PRIMARY KEY, path TEXT NOT NULL, original_name TEXT NOT NULL
             )""")
             row = db.execute("SELECT path FROM iphone_imports WHERE sha256=?", (digest,)).fetchone()
-            if row and Path(row["path"]).is_file():
+            if row and Path(row["path"]).is_file() and sha256_file(Path(row['path'])) == digest:
                 return {"status": "duplicate", "name": filename}
-            folder = self.inbox / digest[:2]
-            folder.mkdir(parents=True, exist_ok=True)
-            dest = folder / (Path(filename).stem[:65] + "-" + digest + Path(filename).suffix.lower())
-            # Naming includes full SHA. A single duplicate upload never replaces files.
-            if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
-                raise RuntimeError("Upload target collision; original retained")
-            if not dest.exists():
-                os.replace(source, dest)
+        # No decoding/copying is performed inside a SQLite write transaction.
+        folder = self.inbox / digest[:2]
+        dest = folder / (digest + Path(filename).suffix.lower())
+        with SafeDirectory(folder) as directory:
+            try:
+                existing = directory.digest(dest.name)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and existing != digest:
+                dest = folder / (digest + '-recovered-' + secrets.token_hex(8) + Path(filename).suffix.lower())
+                existing = None
+            if existing is None:
+                directory.copy(source, dest.name, expected=digest, replace=False)
+        with self.catalog.connection() as db:
             db.execute("INSERT OR REPLACE INTO iphone_imports (sha256,path,original_name) VALUES(?,?,?)",
                        (digest, str(dest), filename))
 
@@ -109,8 +160,10 @@ class MobileServer:
             except ValueError as exc:
                 # Avoid treating arbitrary folder registration errors as success.
                 raise RuntimeError(f"Imported file saved but library registration failed: {exc}") from exc
+        prepared = self.catalog.prepare(dest)
         with self.catalog.connection() as db:
-            photo_id, _, _ = self.catalog._upsert(db, root, dest)
+            photo_id, _, _ = self.catalog._upsert(db, root, dest, prepared=prepared)
+            db.execute('UPDATE photos SET name=? WHERE id=?', (filename, photo_id))
         return {"status": "imported", "photo_id": photo_id, "name": filename}
 
     def _handler_class(self):
@@ -183,9 +236,12 @@ class MobileServer:
                     device = self._sync_device()
                     if device is None:
                         return
+                    if path == '/api/sync/v1/verify' and method == 'POST':
+                        return self._json(200, manager.verify(device, self._read_sync_json()))
                     if path == "/api/sync/v1/status" and method == "GET":
                         manager.mark_seen(device)
-                        return self._json(200, {"device_id": device, "paused": manager.dashboard()["paused"]})
+                        return self._json(200, {"device_id": device, "paused": manager.dashboard()["paused"],
+                                                "receiver_id": manager.receiver_id})
                     if path == "/api/sync/v1/transfers" and method == "POST":
                         result = manager.begin(device, self._read_sync_json())
                         manager.mark_seen(device)
@@ -193,6 +249,8 @@ class MobileServer:
                     segments = path.split("/")
                     if len(segments) >= 6 and segments[:5] == ["", "api", "sync", "v1", "transfers"]:
                         transfer_id = segments[5]
+                        if len(segments) == 6 and method == 'DELETE':
+                            return self._json(200, manager.cancel(device, transfer_id))
                         if len(segments) == 6 and method == "GET":
                             manager.mark_seen(device)
                             return self._json(200, manager.status(device, transfer_id))
@@ -215,6 +273,11 @@ class MobileServer:
                     return self._json(404, {"error": "Unknown sync endpoint"})
                 except SyncFailure as exc:
                     return self._json(exc.status, {"error": str(exc), **exc.details})
+                except sqlite3.OperationalError:
+                    LOG.exception('Sync database temporarily unavailable')
+                    return self._json(503, {'error': 'Storage busy; retry after reconnecting', 'retryable': True})
+                except ValueError:
+                    return self._json(400, {'error': 'Invalid or unsafe storage path'})
                 except (OSError, RuntimeError):
                     LOG.exception("Native sync I/O failure")
                     return self._json(500, {"error": "Sync storage error; source unchanged"})
@@ -224,6 +287,12 @@ class MobileServer:
                 if path.startswith("/api/sync/v1/"):
                     return self._sync_handle("PUT", path)
                 return self._json(404, {"error": "Not found"})
+
+            def do_DELETE(self):
+                path = urlsplit(self.path).path
+                if path.startswith('/api/sync/v1/'):
+                    return self._sync_handle('DELETE', path)
+                return self._json(404, {'error': 'Not found'})
 
             def do_GET(self):
                 path = urlsplit(self.path).path

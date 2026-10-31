@@ -48,7 +48,8 @@ public sealed class PythonEngineBridge : IDisposable
         return Task.CompletedTask;
     }
 
-    public async Task<JsonElement> RequestAsync(string action, object? parameters = null)
+    public async Task<JsonElement> RequestAsync(string action, object? parameters = null,
+        CancellationToken cancellationToken = default)
     {
         if (_disposed || _process is null || _process.HasExited)
             throw new InvalidOperationException("Local photo engine is not running. " + _lastError);
@@ -59,7 +60,7 @@ public sealed class PythonEngineBridge : IDisposable
         var message = JsonSerializer.Serialize(new { id, action, @params = parameters ?? new { } });
         try
         {
-            await _stdinLock.WaitAsync();
+            await _stdinLock.WaitAsync(cancellationToken);
             try
             {
                 await _process.StandardInput.WriteLineAsync(message);
@@ -72,7 +73,13 @@ public sealed class PythonEngineBridge : IDisposable
             _pending.TryRemove(id, out _);
             throw;
         }
-        return await source.Task;
+        try
+        {
+            var timeout = action is "scan" or "install_model" or "backup_local" or "backup_s3" or "duplicates"
+                ? TimeSpan.FromHours(12) : TimeSpan.FromMinutes(action == "search" ? 5 : 1);
+            return await source.Task.WaitAsync(timeout, cancellationToken);
+        }
+        finally { _pending.TryRemove(id, out _); }
     }
 
     private async Task ReadStdoutAsync()
@@ -95,11 +102,15 @@ public sealed class PythonEngineBridge : IDisposable
                     if (!root.TryGetProperty("id", out var idElement) ||
                         !idElement.TryGetInt32(out var id) || !_pending.TryRemove(id, out var source))
                         continue;
-                    if (root.GetProperty("ok").GetBoolean())
-                        source.TrySetResult(root.GetProperty("data").Clone());
-                    else
-                        source.TrySetException(new InvalidOperationException(
-                            root.TryGetProperty("error", out var err) ? err.GetString() : "Unknown engine error"));
+                    try
+                    {
+                        if (root.GetProperty("ok").GetBoolean())
+                            source.TrySetResult(root.GetProperty("data").Clone());
+                        else
+                            source.TrySetException(new InvalidOperationException(
+                                root.TryGetProperty("error", out var err) ? err.GetString() : "Unknown engine error"));
+                    }
+                    catch (Exception ex) { source.TrySetException(new IOException("Invalid engine response", ex)); }
                 }
                 catch (JsonException ex)
                 {
@@ -136,7 +147,9 @@ public sealed class PythonEngineBridge : IDisposable
         _disposed = true;
         try
         {
-            if (_process is { HasExited: false }) _process.Kill(entireProcessTree: true);
+            // The explicitly enabled receiver is a detached process with its own
+            // stop control. Closing this window only stops the stdio worker.
+            if (_process is { HasExited: false }) _process.Kill(entireProcessTree: false);
         }
         catch (Exception) { }
         _process?.Dispose();

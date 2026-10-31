@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import SKIP_DIRS, SUPPORTED_EXTENSIONS, app_home
+from .file_safety import is_reparse
 
 LOG = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 150_000_000
@@ -137,12 +138,13 @@ class PhotoCatalog:
         cache_root = self.home.resolve()
         for directory, dirs, files in os.walk(root, followlinks=False, onerror=on_error):
             dirs[:] = sorted(d for d in dirs if d.lower() not in SKIP_DIRS and
-                             not Path(directory, d).is_symlink() and
+                             not is_reparse(Path(directory, d)) and
+                             Path(root).resolve() in Path(directory, d).resolve(strict=False).parents and
                              Path(directory, d).resolve(strict=False) != cache_root)
             for name in sorted(files):
                 if Path(name).suffix.lower() in SUPPORTED_EXTENSIONS:
                     path = Path(directory, name)
-                    if not path.is_symlink():
+                    if not is_reparse(path):
                         yield path
 
     def _thumb(self, path: Path, mtime_ns: int) -> tuple[str, int, int, str | None]:
@@ -170,16 +172,20 @@ class PhotoCatalog:
             # Keep catalog entry so the user sees the filename and can open in Photos.
             return "", 0, 0, str(exc)[:300]
 
-    def _upsert(self, db: sqlite3.Connection, root: str, path: Path) -> tuple[int, bool, bool]:
+    def prepare(self, path):
+        stat = path.stat()
+        return stat, self._thumb(path, stat.st_mtime_ns)
+
+    def _upsert(self, db: sqlite3.Connection, root: str, path: Path, prepared=None) -> tuple[int, bool, bool]:
         try:
-            stat = path.stat()
+            stat = prepared[0] if prepared else path.stat()
         except (FileNotFoundError, PermissionError):
             return 0, False, False
         p = str(path)
-        previous = db.execute("SELECT id,size,mtime_ns,thumb_path,error FROM photos WHERE path=?", (p,)).fetchone()
-        changed = previous is None or previous["size"] != stat.st_size or previous["mtime_ns"] != stat.st_mtime_ns
+        previous = db.execute("SELECT id,size,mtime_ns,thumb_path,error,name FROM photos WHERE path=?", (p,)).fetchone()
+        changed = previous is None or previous["size"] != stat.st_size or previous["mtime_ns"] != stat.st_mtime_ns or bool(previous['error'])
         if changed:
-            thumbnail, width, height, taken_or_error = self._thumb(path, stat.st_mtime_ns)
+            thumbnail, width, height, taken_or_error = prepared[1] if prepared else self._thumb(path, stat.st_mtime_ns)
             error = None if thumbnail else taken_or_error
             taken = taken_or_error if thumbnail else None
             db.execute("""
@@ -189,7 +195,7 @@ class PhotoCatalog:
                   size=excluded.size,mtime_ns=excluded.mtime_ns,taken_at=excluded.taken_at,
                   width=excluded.width,height=excluded.height,thumb_path=excluded.thumb_path,
                   error=excluded.error,indexed_at=excluded.indexed_at
-            """, (p, root, path.name, stat.st_size, stat.st_mtime_ns, taken, width, height,
+            """, (p, root, previous['name'] if previous else path.name, stat.st_size, stat.st_mtime_ns, taken, width, height,
                   thumbnail, error, datetime.now(timezone.utc).isoformat()))
             photo_id = db.execute("SELECT id FROM photos WHERE path=?", (p,)).fetchone()["id"]
             if previous:
@@ -232,6 +238,7 @@ class PhotoCatalog:
                     batch = embed_queue[:]
                     embed_queue.clear()
                     try:
+                        db.commit()  # Never hold a SQLite writer while running model inference.
                         vectors = encoder.embed_images([p for _, p in batch])
                         if len(vectors) != len(batch):
                             raise ValueError("AI model returned wrong batch size")
@@ -246,6 +253,7 @@ class PhotoCatalog:
                         LOG.warning("AI batch failed (%s); retrying images individually", exc)
                         for photo_id, p in batch:
                             try:
+                                db.commit()
                                 vec = np.asarray(encoder.embed_images([p])[0], dtype=np.float32).reshape(-1)
                                 if not np.isfinite(vec).all() or vec.size == 0:
                                     raise ValueError("invalid embedding")
@@ -261,7 +269,9 @@ class PhotoCatalog:
                     p = str(path)
                     seen_paths.add(p)
                     seen += 1
+                    db.commit()  # Release preceding writes before decoding the next image.
                     photo_id, was_updated, decodable = self._upsert(db, root, path)
+                    db.commit()
                     if photo_id == 0:
                         errors += 1
                         continue
@@ -309,7 +319,7 @@ class PhotoCatalog:
     def browse(self, limit: int = 120, offset: int = 0) -> list[dict]:
         with self.connection() as db:
             rows = db.execute("""
-                SELECT id,path,name,thumb_path,mtime_ns,width,height,error FROM photos
+                SELECT id,path,name,thumb_path,mtime_ns,taken_at,width,height,error FROM photos
                 ORDER BY mtime_ns DESC,id DESC LIMIT ? OFFSET ?
             """, (max(1, min(int(limit), 300)), max(0, int(offset)))).fetchall()
             return [dict(row) for row in rows]
@@ -343,7 +353,7 @@ class PhotoCatalog:
         pattern = "%" + escaped + "%"
         with self.connection() as db:
             return [dict(row) for row in db.execute("""
-                SELECT id,path,name,thumb_path,mtime_ns,width,height,error FROM photos
+                SELECT id,path,name,thumb_path,mtime_ns,taken_at,width,height,error FROM photos
                 WHERE name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\'
                 ORDER BY mtime_ns DESC,id DESC LIMIT ?
             """, (pattern, pattern, limit))]
@@ -355,7 +365,7 @@ class PhotoCatalog:
         vectors = []
         with self.connection() as db:
             for r in db.execute("""
-                SELECT p.id,p.path,p.name,p.thumb_path,p.mtime_ns,p.width,p.height,p.error,
+                SELECT p.id,p.path,p.name,p.thumb_path,p.mtime_ns,p.taken_at,p.width,p.height,p.error,
                        e.dimensions,e.vector FROM embeddings e
                 JOIN photos p ON p.id=e.photo_id WHERE e.model_id=?
             """, (encoder.model_id,)):
@@ -365,7 +375,7 @@ class PhotoCatalog:
                 if v.size != probe.size:
                     continue
                 vectors.append(v)
-                metadata.append({k: r[k] for k in ("id", "path", "name", "thumb_path", "mtime_ns", "width", "height", "error")})
+                metadata.append({k: r[k] for k in ("id", "path", "name", "thumb_path", "mtime_ns", "taken_at", "width", "height", "error")})
         if not vectors:
             return []
         matrix = np.stack(vectors).astype(np.float32, copy=False)

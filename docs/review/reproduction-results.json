@@ -1,0 +1,116 @@
+{
+  "note": "Observational review reproductions; product defects are intentionally asserted.",
+  "passed_observations": 12,
+  "total": 12,
+  "results": [
+    {
+      "case": "R01_counterevidence_new_device_dashboard_counts_are_zero_not_null",
+      "observation_reproduced": true,
+      "details": {
+        "transfers": 0,
+        "completed": 0,
+        "pending": 0
+      }
+    },
+    {
+      "case": "R02_corrupt_completed_backup_still_reported_complete",
+      "observation_reproduced": true,
+      "details": {
+        "retry_status": "complete",
+        "stored_hash_matches": false
+      }
+    },
+    {
+      "case": "R03_complete_endpoint_acknowledges_missing_backup",
+      "observation_reproduced": true,
+      "details": {
+        "complete_endpoint": "complete",
+        "begin_endpoint": "pending"
+      }
+    },
+    {
+      "case": "R04_secondary_backups_omit_MOV_DNG_and_Live_Photo_relationships",
+      "observation_reproduced": true,
+      "details": {
+        "completed_resources": 3,
+        "local_backup_files": 1,
+        "s3_planned_objects": 1,
+        "backed_up_extensions": [
+          ".png"
+        ]
+      }
+    },
+    {
+      "case": "R05_cross_volume_finalize_has_no_copy_fallback",
+      "observation_reproduced": true,
+      "details": {
+        "mode": "fault injection, not physical two-volume test",
+        "status": "pending",
+        "received_offset": 18
+      }
+    },
+    {
+      "case": "R06_same_bytes_different_original_filenames_create_duplicate_imports",
+      "observation_reproduced": true,
+      "details": {
+        "identical_content_physical_copies": 2
+      }
+    },
+    {
+      "case": "R07_perceptual_distance_four_pair_missed_by_four_band_prefilter",
+      "observation_reproduced": true,
+      "details": {
+        "true_hamming_distance": 4,
+        "requested_threshold": 4,
+        "groups_returned": 0,
+        "mode": "controlled fingerprints; no real image perceptual-quality claim"
+      }
+    },
+    {
+      "case": "R08_installing_decoder_does_not_retry_unchanged_HEIC_thumbnail",
+      "observation_reproduced": true,
+      "details": {
+        "decoder_retry_calls": 0,
+        "updated": 0,
+        "old_error_retained": true
+      }
+    },
+    {
+      "case": "R09_concurrent_duplicate_chunk_is_serialized_without_corruption",
+      "observation_reproduced": true,
+      "details": {
+        "statuses": [
+          200,
+          409
+        ],
+        "completed": true
+      }
+    },
+    {
+      "case": "R10_100GiB_rejected_and_reserved_windows_filename_accepted_until_finalize",
+      "observation_reproduced": true,
+      "details": {
+        "reserved_stem_is_safely_hash_suffixed": true,
+        "oversize_rejected": true
+      }
+    },
+    {
+      "case": "R11_Python_AST_and_WinUI_XAML_event_handlers_are_consistent",
+      "observation_reproduced": true,
+      "details": {
+        "python_files_parsed": 21,
+        "xaml_handler_count": 16,
+        "note": "Syntax/name consistency only; not a WinUI or Swift build"
+      }
+    },
+    {
+      "case": "R12_stale_catalog_entries_silently_omitted_from_backup_success",
+      "observation_reproduced": true,
+      "details": {
+        "catalog_photos": 1,
+        "backup_files": 0,
+        "reported_stale_count": null
+      }
+    }
+  ]
+}

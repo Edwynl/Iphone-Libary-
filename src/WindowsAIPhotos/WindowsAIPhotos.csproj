@@ -17,6 +17,9 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.4" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="..\..\engine\ai_photos\mobile_web\**\*"
+             Link="engine\ai_photos\mobile_web\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\engine\ai_photos\**\*.py"
              Link="engine\ai_photos\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" />

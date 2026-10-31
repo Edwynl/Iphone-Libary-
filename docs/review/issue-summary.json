@@ -1,0 +1,168 @@
+{
+  "head": "c6408c1d2220241e555aa450839b553998ea1bd2",
+  "counts": {
+    "P0": 1,
+    "P1": 11,
+    "P2": 11,
+    "P3": 3
+  },
+  "total": 26,
+  "issues": [
+    {
+      "id": "P0-01",
+      "title": "本地备份可经目标目录 junction 覆盖来源原片",
+      "file": "engine/ai_photos/backup.py",
+      "line": 56
+    },
+    {
+      "id": "P1-01",
+      "title": "WinUI C# 编译被错误 FontWeights 命名空间阻断",
+      "file": "src/WindowsAIPhotos/SyncManagement.cs",
+      "line": 48
+    },
+    {
+      "id": "P1-02",
+      "title": "Windows 输出遗漏 iPhone 网页所需静态资源",
+      "file": "src/WindowsAIPhotos/WindowsAIPhotos.csproj",
+      "line": 20
+    },
+    {
+      "id": "P1-03",
+      "title": "iPhone 完成检查点不与接收端及实际备份状态核对",
+      "file": "ios/PhotosCompanion/Sources/SyncState.swift",
+      "line": 113
+    },
+    {
+      "id": "P1-04",
+      "title": "已完成传输会继续确认丢失或损坏的文件",
+      "file": "engine/ai_photos/sync.py",
+      "line": 193
+    },
+    {
+      "id": "P1-05",
+      "title": "PhotoKit alternatePhoto 被丢弃，可漏备 RAW/ProRAW",
+      "file": "ios/PhotosCompanion/Sources/PhotoSource.swift",
+      "line": 42
+    },
+    {
+      "id": "P1-06",
+      "title": "关闭自动备份后，已排队后台任务仍可上传",
+      "file": "ios/PhotosCompanion/Sources/BackgroundScheduler.swift",
+      "line": 17
+    },
+    {
+      "id": "P1-07",
+      "title": "后台过期取消不能结束导出/上传等待，后续调度可能中断",
+      "file": "ios/PhotosCompanion/Sources/BackgroundScheduler.swift",
+      "line": 21
+    },
+    {
+      "id": "P1-08",
+      "title": "单个不可处理资源会持续阻塞后续全部备份",
+      "file": "ios/PhotosCompanion/Sources/SyncState.swift",
+      "line": 115
+    },
+    {
+      "id": "P1-09",
+      "title": "二次备份遗漏 MOV/DNG，且不备份 Live Photo 关联清单",
+      "file": "engine/ai_photos/backup.py",
+      "line": 22
+    },
+    {
+      "id": "P1-10",
+      "title": "接收暂存与图片目录跨卷时无法完成传输",
+      "file": "engine/ai_photos/sync.py",
+      "line": 302
+    },
+    {
+      "id": "P1-11",
+      "title": "备份静默忽略已修改、丢失或不可访问的索引文件",
+      "file": "engine/ai_photos/backup.py",
+      "line": 35
+    },
+    {
+      "id": "P2-01",
+      "title": "扫描与上传争用 SQLite 写锁，错误未按协议返回",
+      "file": "engine/ai_photos/catalog.py",
+      "line": 235
+    },
+    {
+      "id": "P2-02",
+      "title": "Python 3.11 的扫描防链接逻辑漏掉 NTFS junction",
+      "file": "engine/ai_photos/catalog.py",
+      "line": 138
+    },
+    {
+      "id": "P2-03",
+      "title": "相似照片预筛选漏掉阈值 4/5 内的哈希对",
+      "file": "engine/ai_photos/duplicates.py",
+      "line": 117
+    },
+    {
+      "id": "P2-04",
+      "title": "安装 HEIC 解码器后不重试既有失败缩略图",
+      "file": "engine/ai_photos/catalog.py",
+      "line": 180
+    },
+    {
+      "id": "P2-05",
+      "title": "原生导入对同内容不同文件名仍产生多份文件",
+      "file": "engine/ai_photos/sync.py",
+      "line": 291
+    },
+    {
+      "id": "P2-06",
+      "title": "崩溃遗留导出/分块文件与未完成任务缺乏维护机制",
+      "file": "ios/PhotosCompanion/Sources/BackgroundChunkUploader.swift",
+      "line": 66
+    },
+    {
+      "id": "P2-07",
+      "title": "配对凭证未绑定服务器地址，且没有实施文档中的 ts.net 限制",
+      "file": "ios/PhotosCompanion/Sources/SyncAPI.swift",
+      "line": 62
+    },
+    {
+      "id": "P2-08",
+      "title": "Wi-Fi only 不是贯穿整个备份过程的明确蜂窝网络策略",
+      "file": "ios/PhotosCompanion/Sources/SyncAPI.swift",
+      "line": 81
+    },
+    {
+      "id": "P2-09",
+      "title": "照片无 EXIF 或视频的原始拍摄时间未被同步清单保留",
+      "file": "src/WindowsAIPhotos/Models/PhotoCard.cs",
+      "line": 33
+    },
+    {
+      "id": "P2-10",
+      "title": "同步语义查询堵塞 worker 请求，桥接没有超时/取消",
+      "file": "engine/ai_photos/worker.py",
+      "line": 120
+    },
+    {
+      "id": "P2-11",
+      "title": "AI 工件未固定不可变版本，installed 不等于可用",
+      "file": "engine/ai_photos/semantic.py",
+      "line": 38
+    },
+    {
+      "id": "P3-01",
+      "title": "同步管理界面主要依赖手动刷新",
+      "file": "src/WindowsAIPhotos/SyncManagement.cs",
+      "line": 146
+    },
+    {
+      "id": "P3-02",
+      "title": "架构文档仍称没有 HTTP 服务",
+      "file": "docs/ARCHITECTURE.md",
+      "line": 25
+    },
+    {
+      "id": "P3-03",
+      "title": "CI 未覆盖 iOS 和实际输出目录的跨端冒烟",
+      "file": ".github/workflows/ci.yml",
+      "line": 21
+    }
+  ]
+}

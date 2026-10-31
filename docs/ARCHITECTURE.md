@@ -22,7 +22,15 @@ Python Worker (engine/ai_photos/worker.py)
      SQLite embeddings table -> NumPy dot-product top-K
 ```
 
-All photo bytes are read locally using Pillow. No HTTP server is started.
+Indexing reads photo bytes locally using Pillow. The HTTP receiver is off by
+default; explicit `start_mobile` binds loopback only. Remote access requires
+private Tailscale Serve HTTPS, never public port forwarding or Funnel.
+`start_mobile` now launches an independent opt-in receiver. Closing WinUI stops
+the stdio worker; the receiver remains active until explicitly stopped or the
+login session ends. Reopening the app attaches to it. Local management uses a
+DPAPI-authenticated, remote-rejecting Windows named pipe and an OS singleton
+lease per data directory. No automatic startup service is installed. See
+[native sync lifecycle](PHASE2_NATIVE_SYNC.md) for controls and limits.
 An image might be decoded twice on its first scan (thumbnail and embedding).
 Semantic vectors are ~768-1024 floats depending on the actual model config;
 size is validated on read. Exact dimensionality must be verified at runtime.
@@ -47,8 +55,9 @@ Worker replies:
 
 Actions: `ping`, `status`, `folders`, `add_folder`, `browse`, `search`, `scan`,
 `install_model`. Long-running scan and install are worker-thread jobs; UI
-receives async progress events and final responses. Only one long-running
-operation is allowed at a time. Progress and errors should be presented clearly.
+receives async progress events and final responses. One mutating long-running
+operation is allowed at a time; a separate bounded semantic-search slot leaves
+status and management responsive. Bridge waits are bounded and accept cancellation.
 
 ## Design invariants
 
@@ -67,9 +76,65 @@ operation is allowed at a time. Progress and errors should be presented clearly.
   but cache+ANN index should be benchmarked before release.
 - Python + PyTorch must be packaged or replaced with verified ONNX/Windows ML
   image and text encoders + tokenizer to produce an independent Windows installer.
-- Model revision is not pinned to an immutable HF commit yet; production must
-  pin, hash-check and ship corresponding attribution/licensing notices.
+- Model revision is pinned in config.py. Installation writes a SHA-256 artifact
+  manifest and verifies it before use. Python 3.11 dependency locks include hashes;
+  real model runtime/quality and complete redistribution notices remain release gates.
 - Heic/raw decoding, large-file corruption, image cancellation, zero-copy
   thumbnails and multicore batching are follow-up tasks.
 - GUI is not yet integrated with Windows-native folder watcher, taskbar progress,
   per-folder permission prompts, rename detection or update distribution.
+
+## Resource backup and recovery after review fixes
+
+- `photos` remains the browse/index table. Completed native resources are also
+  included in both backup plans, including MOV/MP4/DNG. JSON manifests
+  retains original names, per-device asset/resource associations, capture dates,
+  SHA-256, sizes and backup paths. One physical file may have several logical refs.
+- Missing, stale, unsafe or corrupt entries make `complete=false`; CLI returns 2.
+  The desktop UI requires reconciliation instead of showing unconditional success.
+- Local output uses validated, pinned non-reparse directories; Windows leases
+  prevent directory replacement and keep the leaf nonempty during writes.
+- Local v2 backups publish immutable `objects/<sha-prefix>/<sha><extension>`
+  files with `replace=False`, then verify all references and publish an immutable
+  `snapshots/<id>.json`. Only a verified full run replaces the root
+  `backup-manifest.json` last-successful selection. The root is a complete manifest
+  copy, so the default restore interface stays usable. If publication reports an
+  error after atomic rename, `latest_published` reflects visibility of the new
+  complete manifest; the result still reports incomplete/uncertain durability.
+- A manifest separates `backup_path` (content object) from `restore_path`
+  (original root/name). Repeated names and native asset associations survive
+  content sharing. Old v1 manifests are archived before successful migration;
+  their flat files are never overwritten. No history retention deletion or orphan
+  object GC is automatic. This is not a globally atomic filesystem snapshot of
+  changing sources or a guarantee against physical power-loss/media failure.
+- `restore-local BACKUP EMPTY_TARGET` verifies hashes and paths; `--apply` copies
+  into an independent empty target without overwriting existing files, and emits
+  a restored resource manifest. It does not recreate an Apple Photos library.
+- `backup-history BACKUP` lists complete snapshot metadata; `restore-local ...
+  --snapshot ID` selects history. Restore preflights every referenced checksum,
+  size and safe output path before copying. Existing v1 snapshots are supported.
+- S3 uses explicit SHA256 checksum negotiation and a resource manifest. No live
+  provider upload/download or full cloud restore has been validated; bucket
+  versioning, recovery drills and optional client-side encryption remain gates.
+
+## Native iPhone verification boundary
+
+The iPhone now retains its PhotoKit tracker for the process lifetime and reuses
+successful discovery for unchanged automatic batches. A locked revision ticket
+prevents a notification during discovery from being cleared by stale completion;
+failed/cancelled discovery cannot authorize cache reuse. Full refresh is still
+required on cold start, manual full sync, foreground activation, context changes
+or six-hour eligibility expiry. This removes unconditional per-pass scanning
+within a surviving unchanged process; it is not persistent incremental history
+or evidence of battery savings. Progress distinguishes batches, current backlog
+and receiver-scoped snapshot completion. See
+[current follow-up](review/DISCOVERY_PROGRESS_FIXES.md) for tests and limitations.
+
+The repaired Swift sources have not been compiled by Xcode or run on an iPhone.
+They include alternatePhoto resources, receiver-scoped verified checkpoints,
+per-resource failure records, cancellation-aware PhotoKit streaming and URLSession
+waiters, and cancellation of queued automatic work when disabled. Strict Wi-Fi
+mode reads local originals only: PhotoKit offers no per-resource cellular switch,
+so iCloud-only originals must first be downloaded in Photos or the restriction
+explicitly disabled. This limit is shown in the app. A new simulator CI job is
+configured but has not been dispatched during local review/fixing.

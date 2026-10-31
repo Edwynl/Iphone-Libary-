@@ -1,0 +1,54 @@
+{
+  "pytest_passed": 98,
+  "pytest_skipped": 1,
+  "pytest_failures": 0,
+  "pytest_errors": 0,
+  "pytest_seconds": 44.226,
+  "new_snapshot_tests_passed": 23,
+  "new_snapshot_junction_tests_passed": 2,
+  "shipped_interface_checks": {
+    "shipped_worker_backup_local_twice": true,
+    "shipped_cli_history_snapshots": 2,
+    "shipped_cli_restore_old_exact": true,
+    "shipped_cli_restore_latest_exact": true,
+    "source_unchanged_by_backup_or_restore": true
+  },
+  "shipped_files_byte_verified": [
+    "ai_photos/__init__.py",
+    "ai_photos/__main__.py",
+    "ai_photos/backup.py",
+    "ai_photos/catalog.py",
+    "ai_photos/cli.py",
+    "ai_photos/config.py",
+    "ai_photos/duplicates.py",
+    "ai_photos/file_safety.py",
+    "ai_photos/mobile.py",
+    "ai_photos/mobile_web/app.css",
+    "ai_photos/mobile_web/app.js",
+    "ai_photos/mobile_web/index.html",
+    "ai_photos/organize.py",
+    "ai_photos/receiver_agent.py",
+    "ai_photos/semantic.py",
+    "ai_photos/sync.py",
+    "ai_photos/worker.py"
+  ],
+  "scheduler_direct_call_sites": [
+    {
+      "path": "ios/PhotosCompanion/Sources/SyncState.swift",
+      "line": 79,
+      "source": "do { try BackgroundScheduler.schedule(); schedulingError = \"\" }"
+    }
+  ],
+  "swift_grammar_files": 13,
+  "swift_type_sdk_xcode_device_verification": "Not Verified",
+  "actual_power_loss_cross_volume_cloud_recovery": "Not Verified",
+  "evidence_working_tree_sha256": {
+    "snapshot-pytest.xml": "9d39d3c9ff73d53bded56524c22d34a5b24b7c0771c0e88ec375fc9574c15f9b",
+    "snapshot-pytest.log": "5b2b4fedffe5abfd0ab510f57ae612196c86398a418becf5590d23a4cabbf1b2",
+    "snapshot-dotnet-build.log": "91978cfd328242952dfc6b15b74f007f7614e0ad1f79c2aaaf72c1c1bec622be",
+    "snapshot-interface-smoke.log": "9dcdb8f408a346963fc34a508b92f498b149d1fa8ed789ad1ee72d02ac4528a1",
+    "snapshot-output-smoke.log": "48cee669ebff41855fff67705a53d0ae67d696303478552459e0dd0b54183efe",
+    "snapshot-static-check.log": "a4443afdcfb6d7363adb285762515ccf7cf50473b1a05c20c1a50f6bed4d26b0",
+    "snapshot-swift-syntax.json": "09dd1ff9b4930307761d269c38c1d9d333119f73b615654dc456600f97c566b9"
+  }
+}

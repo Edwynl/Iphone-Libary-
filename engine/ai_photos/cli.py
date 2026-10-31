@@ -5,12 +5,13 @@ import argparse
 import json
 import sys
 
+from .backup import backup_history, backup_local, backup_s3, restore_local
 from .catalog import PhotoCatalog
-from .semantic import Siglip2Encoder
 from .duplicates import find_duplicates
-from .backup import backup_local, backup_s3
 from .mobile import MobileServer
 from .organize import virtual_albums
+from .receiver_agent import ReceiverController
+from .semantic import Siglip2Encoder
 
 
 def main(argv=None) -> int:
@@ -35,6 +36,13 @@ def main(argv=None) -> int:
     p = sub.add_parser("backup-local", help="Copy originals to independent storage (dry-run by default)")
     p.add_argument("target")
     p.add_argument("--apply", action="store_true", help="Explicitly perform copy")
+    p = sub.add_parser('restore-local', help='Verify a manifest and restore into an empty independent folder')
+    p.add_argument('backup')
+    p.add_argument('target')
+    p.add_argument('--apply', action='store_true')
+    p.add_argument('--snapshot', help='Restore a retained snapshot ID; default is the last successful backup')
+    p = sub.add_parser('backup-history', help='List retained local snapshot IDs (file hashes are verified at restore)')
+    p.add_argument('backup')
     p = sub.add_parser("backup-s3", help="Opt-in S3 compatible cloud backup (dry-run by default)")
     p.add_argument("--bucket", required=True)
     p.add_argument("--endpoint-url")
@@ -43,12 +51,23 @@ def main(argv=None) -> int:
     p = sub.add_parser("serve-iphone", help="Opt-in loopback-only iPhone uploader for Tailscale Serve")
     p.add_argument("--port", type=int, default=8787)
     p.add_argument("--inbox")
+    p = sub.add_parser('receiver-start', help='Explicitly start the independent background receiver for this login session')
+    p.add_argument('--port', type=int, default=8787)
+    p.add_argument('--inbox')
+    sub.add_parser('receiver-status', help='Inspect the background receiver without starting it')
+    sub.add_parser('receiver-stop', help='Stop the background receiver without deleting original imports')
     args = parser.parse_args(argv)
     cat = PhotoCatalog()
     ai = Siglip2Encoder()
     try:
         if args.cmd == "status":
             data = cat.stats(ai.model_id) | {"ai_installed": ai.installed}
+        elif args.cmd == 'receiver-start':
+            data = ReceiverController(cat.home).start(port=args.port, inbox=args.inbox)
+        elif args.cmd == 'receiver-status':
+            data = ReceiverController(cat.home).status()
+        elif args.cmd == 'receiver-stop':
+            data = ReceiverController(cat.home).stop()
         elif args.cmd == "add-folder":
             data = cat.add_folder(args.path)
         elif args.cmd == "folders":
@@ -70,6 +89,10 @@ def main(argv=None) -> int:
             data = find_duplicates(cat, similar_distance=args.distance)
         elif args.cmd == "backup-local":
             data = backup_local(cat, args.target, apply=args.apply)
+        elif args.cmd == 'restore-local':
+            data = restore_local(args.backup, args.target, apply=args.apply, snapshot=args.snapshot)
+        elif args.cmd == 'backup-history':
+            data = backup_history(args.backup)
         elif args.cmd == "backup-s3":
             data = backup_s3(cat, bucket=args.bucket, endpoint_url=args.endpoint_url,
                              prefix=args.prefix, apply=args.apply)
@@ -88,7 +111,7 @@ def main(argv=None) -> int:
         else:
             parser.error("Invalid command")
         print(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        return 0
+        return 2 if data.get('complete') is False else 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

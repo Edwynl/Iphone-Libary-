@@ -8,9 +8,10 @@ struct PairRequest: Encodable {
 struct PairReply: Decodable {
     let device_id: String
     let device_token: String
+    let receiver_id: String
     let protocolVersion: Int
     enum CodingKeys: String, CodingKey {
-        case device_id, device_token
+        case device_id, device_token, receiver_id
         case protocolVersion = "protocol"
     }
 }
@@ -20,6 +21,23 @@ struct BeginRequest: Encodable {
     let filename: String
     let size: Int64
     let sha256: String
+    let resource_key: String
+    let asset_created_at: String?
+    let asset_modified_at: String?
+}
+struct VerifyRequest: Encodable {
+    let asset_id: String
+    let resource_type: String
+    let sha256: String
+}
+struct VerifyReply: Decodable { let complete: Bool; let receiver_id: String }
+
+private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }
 struct TransferReply: Decodable {
     let transfer_id: String
@@ -58,13 +76,15 @@ enum SyncAPIError: LocalizedError {
 struct SyncAPI {
     let base: URL
     let wifiOnly: Bool
+    var origin: String { base.absoluteString }
 
     init(serverURL: String, wifiOnly: Bool) throws {
         guard let url = URL(string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines)),
-              url.scheme?.lowercased() == "https", url.host != nil,
+              url.scheme?.lowercased() == "https", let host = url.host?.lowercased(),
+              host.hasSuffix(".ts.net"), host.count > 7, (url.port == nil || url.port == 443),
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
               url.path.isEmpty || url.path == "/" else { throw SyncAPIError.invalidURL }
-        base = url
+        base = URL(string: "https://" + host)!
         self.wifiOnly = wifiOnly
     }
 
@@ -79,6 +99,8 @@ struct SyncAPI {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 90
         request.allowsExpensiveNetworkAccess = !wifiOnly
+        request.allowsCellularAccess = !wifiOnly
+        request.allowsConstrainedNetworkAccess = !wifiOnly
         if data != nil {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = data
@@ -89,7 +111,9 @@ struct SyncAPI {
     private func send<T: Decodable>(_ path: String, method: String, token: String,
                                     payload: Data? = nil) async throws -> T {
         let request = makeRequest(path, method: method, token: token, data: payload)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response) = try await session.data(for: request)
         guard let code = (response as? HTTPURLResponse)?.statusCode else { throw SyncAPIError.invalidResponse }
         guard (200...299).contains(code) else {
             let server = try? JSONDecoder().decode(ServerErrorReply.self, from: data)
@@ -98,16 +122,26 @@ struct SyncAPI {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
-    func pair(masterToken: String, deviceId: String, deviceName: String) async throws -> String {
+    func pair(masterToken: String, deviceId: String, deviceName: String) async throws -> PairReply {
         let body = try JSONEncoder().encode(PairRequest(device_id: deviceId, name: deviceName))
         let reply: PairReply = try await send("api/sync/v1/pair", method: "POST", token: masterToken, payload: body)
         guard reply.protocolVersion == 1 else { throw SyncAPIError.invalidResponse }
-        return reply.device_token
+        return reply
+    }
+
+    func verify(_ item: PhotoResource, checkpoint: ResourceCheckpoint, receiver: String, token: String) async throws -> Bool {
+        let body = try JSONEncoder().encode(VerifyRequest(asset_id: item.assetIdentifier,
+            resource_type: item.kind, sha256: checkpoint.sha256))
+        let reply: VerifyReply = try await send("api/sync/v1/verify", method: "POST", token: token, payload: body)
+        guard reply.receiver_id == receiver else { throw SyncAPIError.notPaired }
+        return reply.complete
     }
 
     func upload(_ item: PhotoResource, exported: ExportedPhotoResource, deviceToken: String) async throws {
         let request = BeginRequest(asset_id: item.assetIdentifier, resource_type: item.kind,
-                                   filename: item.filename, size: exported.size, sha256: exported.sha256)
+                                   filename: item.filename, size: exported.size, sha256: exported.sha256,
+                                   resource_key: item.assetKey, asset_created_at: item.createdAt,
+                                   asset_modified_at: item.modifiedAt)
         let body = try JSONEncoder().encode(request)
         var state: TransferReply = try await send("api/sync/v1/transfers", method: "POST",
                                                    token: deviceToken, payload: body)
@@ -138,7 +172,8 @@ struct SyncAPI {
                 // mean the previous chunk was already committed.
                 let fresh: TransferReply = try await send("api/sync/v1/transfers/\(state.transfer_id)",
                                                           method: "GET", token: deviceToken)
-                guard fresh.offset >= 0, fresh.offset <= exported.size else { throw SyncAPIError.invalidResponse }
+                guard fresh.size == exported.size, fresh.offset >= 0, fresh.offset <= exported.size,
+                      (fresh.chunk_bytes ?? 0) > 0, (fresh.chunk_bytes ?? 0) <= 8 * 1024 * 1024 else { throw SyncAPIError.invalidResponse }
                 offset = fresh.offset
                 state = fresh
                 continue

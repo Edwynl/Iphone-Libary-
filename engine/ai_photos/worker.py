@@ -15,9 +15,10 @@ from .catalog import PhotoCatalog
 from .semantic import Siglip2Encoder
 from .duplicates import find_duplicates
 from .backup import backup_local, backup_s3
-from .mobile import MobileServer, default_inbox
+from .mobile import default_inbox
 from .sync import SyncManager
 from .organize import virtual_albums
+from .receiver_agent import ReceiverController
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 LOG = logging.getLogger(__name__)
@@ -31,7 +32,8 @@ class Worker:
         self._send_lock = threading.Lock()
         self._job_lock = threading.Lock()
         self._busy = False
-        self.mobile_server = None
+        self._search_lock = threading.Lock()
+        self.receiver = ReceiverController(self.catalog.home)
         self.sync_manager = SyncManager(self.catalog, default_inbox())
 
     def send(self, payload: dict) -> None:
@@ -84,27 +86,37 @@ class Worker:
             if action in ("scan", "install_model", "duplicates", "backup_local", "backup_s3"):
                 self._background(request_id, action, params)
                 return
+            if action == 'search' and self.encoder.installed:
+                if not self._search_lock.acquire(blocking=False):
+                    raise RuntimeError('Search already running; retry when it completes')
+                def search():
+                    try:
+                        result = self.catalog.search(params.get('query', ''), params.get('limit', 120), self.encoder)
+                        self.send({'id': request_id, 'ok': True, 'data': result})
+                    except Exception as exc:
+                        self.send({'id': request_id, 'ok': False, 'error': str(exc)})
+                    finally:
+                        self._search_lock.release()
+                threading.Thread(target=search, name='search', daemon=True).start()
+                return
             if action == "start_mobile":
-                if self.mobile_server is None:
-                    self.mobile_server = MobileServer(self.catalog, port=int(params.get("port", 8787)),
-                                                      sync_manager=self.sync_manager)
-                    self.mobile_server.start()
-                data = {"port": self.mobile_server.port, "pairing_token": self.mobile_server.token,
-                        "url": f"http://127.0.0.1:{self.mobile_server.port}",
-                        "tailscale_command": f"tailscale serve --bg {self.mobile_server.port}"}
+                data = self.receiver.start(port=int(params.get('port', 8787)), inbox=params.get('inbox'))
             elif action == "stop_mobile":
-                if self.mobile_server is not None:
-                    self.mobile_server.close()
-                    self.mobile_server = None
-                data = {"stopped": True}
+                data = self.receiver.stop()
             elif action == "sync_dashboard":
                 data = self.sync_manager.dashboard()
-                data["server_running"] = self.mobile_server is not None
-                data["server_port"] = self.mobile_server.port if self.mobile_server else None
+                receiver = self.receiver.status()
+                data['server_running'] = receiver['running']
+                data['server_port'] = receiver.get('port')
+                data['receiver_mode'] = 'background-agent' if receiver['running'] else 'off'
+                data['receiver_error'] = receiver.get('error')
+                data['receiver_pid'] = receiver.get('pid')
             elif action == "sync_pause":
-                data = self.sync_manager.set_paused(bool(params.get("paused", True)))
+                data = self.receiver.manage(self.sync_manager, 'pause', paused=bool(params.get('paused', True)))
             elif action == "sync_revoke_device":
-                data = self.sync_manager.revoke_device(params["device_id"])
+                data = self.receiver.manage(self.sync_manager, 'revoke', device_id=params['device_id'])
+            elif action == 'sync_cancel_transfer':
+                data = self.receiver.manage(self.sync_manager, 'cancel', device_id=params['device_id'], transfer_id=params['transfer_id'])
             elif action == "add_folder":
                 data = self.catalog.add_folder(params["path"])
             elif action == "folders":
@@ -121,6 +133,7 @@ class Worker:
             elif action == "status":
                 data = self.catalog.stats(self.encoder.model_id)
                 data["ai_installed"] = self.encoder.installed
+                data['ai_error'] = getattr(self.encoder, 'last_error', '')
                 data["busy"] = self._busy
             elif action == "ping":
                 data = {"pong": True}

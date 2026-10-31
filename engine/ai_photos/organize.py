@@ -20,7 +20,10 @@ def virtual_albums(catalog: PhotoCatalog) -> dict:
             if len(timestamp) >= 7 and timestamp[:4].isdigit() and timestamp[4] == ':' and timestamp[5:7].isdigit():
                 yearmonth = timestamp[:7].replace(':', '-')
             else:
-                yearmonth = datetime.fromtimestamp(r["mtime_ns"] / 1e9, tz=timezone.utc).strftime('%Y-%m')
+                try:
+                    yearmonth = datetime.fromisoformat(timestamp.replace('Z', '+00:00')).strftime('%Y-%m')
+                except ValueError:
+                    yearmonth = datetime.fromtimestamp(r["mtime_ns"] / 1e9, tz=timezone.utc).strftime('%Y-%m')
             months[yearmonth].append({"id": r["id"], "name": r["name"]})
             folders[r["folder"]] += 1
             formats[Path(r["name"]).suffix.lower()] += 1
