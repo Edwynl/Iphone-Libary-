@@ -13,10 +13,11 @@ public sealed class PhotoCard
     {
         var sourcePath = !string.IsNullOrWhiteSpace(thumbnail) && File.Exists(thumbnail)
             ? thumbnail : path;
+        bool video = new[] { ".mov", ".mp4", ".m4v" }.Contains(System.IO.Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
         BitmapImage? bitmap = null;
         try
         {
-            if (File.Exists(sourcePath))
+            if (!video && File.Exists(sourcePath))
             {
                 bitmap = new BitmapImage(new Uri(sourcePath, UriKind.Absolute));
                 bitmap.DecodePixelWidth = 400;
@@ -39,6 +40,6 @@ public sealed class PhotoCard
         }
         catch (ArgumentOutOfRangeException) { }
 
-        return new PhotoCard { Path = path, FileName = filename, Thumbnail = bitmap, Subtitle = subtitle };
+        return new PhotoCard { Path = path, FileName = filename, Thumbnail = bitmap, Subtitle = video ? "视频 · " + subtitle : subtitle };
     }
 }

@@ -33,6 +33,9 @@
           </StackPanel>
         </Button>
         <StackPanel Grid.Row="2" Spacing="10">
+          <ComboBox x:Name="MediaFilter" Header="媒体分类 / Media" SelectedIndex="0" SelectionChanged="MediaFilter_SelectionChanged" HorizontalAlignment="Stretch">
+            <ComboBoxItem Content="全部 / All"/><ComboBoxItem Content="照片 / Photos"/><ComboBoxItem Content="视频 / Videos"/>
+          </ComboBox>
           <TextBlock Text="SOURCE FOLDERS / 来源目录" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
           <Button x:Name="AddFolderButton" Click="AddFolderButton_Click"
                   HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
@@ -142,7 +145,7 @@
 
       <Grid Grid.Row="3">
         <GridView x:Name="PhotoGrid" IsItemClickEnabled="True" ItemClick="PhotoGrid_ItemClick"
-                  SelectionMode="None" Padding="0" Margin="-10,0,-8,0"
+                  SelectionMode="None" SelectionChanged="PhotoGrid_SelectionChanged" Padding="0" Margin="-10,0,-8,0"
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
           <GridView.ItemTemplate>
@@ -166,12 +169,18 @@
 
       <Grid Grid.Row="4" ColumnSpacing="8">
         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
-        <TextBlock Text="Original photos remain untouched · Click an image to open it"
+        <TextBlock Grid.Column="4" Text="点击照片打开原图；选择模式可多选当前已加载的照片"
                    VerticalAlignment="Center" FontSize="11" Opacity="0.6"/>
-        <Button x:Name="LoadMoreButton" Grid.Column="1" Content="Load more" Click="LoadMoreButton_Click"
+        <Button x:Name="SelectButton" Grid.Column="0" Content="选择照片" Click="SelectButton_Click"/>
+        <Button x:Name="SelectAllButton" Grid.Column="1" Content="全选已加载" Click="SelectAllButton_Click" Visibility="Collapsed"/>
+        <Button x:Name="RecycleButton" Grid.Column="2" Content="移到回收站 (0)" Click="RecycleButton_Click" IsEnabled="False" Visibility="Collapsed"/>
+        <Button x:Name="LoadMoreButton" Grid.Column="3" Content="Load more" Click="LoadMoreButton_Click"
                 Visibility="Collapsed"/>
       </Grid>
     </Grid>

@@ -22,6 +22,8 @@ public sealed partial class MainWindow : Window
     private bool _working;
     private bool _isSearch;
     private int _offset;
+    private bool _selecting;
+    private string MediaType => MediaFilter.SelectedIndex == 1 ? "photo" : MediaFilter.SelectedIndex == 2 ? "video" : "all";
 
     public MainWindow()
     {
@@ -103,9 +105,9 @@ public sealed partial class MainWindow : Window
     {
         _isSearch = false;
         if (reset) _offset = 0;
-        var result = await CallAsync("browse", new { limit = PageSize, offset = _offset });
+        var result = await CallAsync("browse", new { limit = PageSize, offset = _offset, media_type = MediaType });
         DisplayPhotos(result.GetProperty("photos"), append: !reset);
-        PageTitle.Text = "All Photos";
+        PageTitle.Text = MediaType == "video" ? "Videos / 视频" : MediaType == "photo" ? "Photos / 照片" : "All media / 全部";
         StatusText.Text = _photos.Count == 0 ? "Add a local folder to start scanning."
             : $"Showing {_photos.Count:N0} local photos. Select an image to open its original file.";
     }
@@ -160,6 +162,9 @@ public sealed partial class MainWindow : Window
         ManageSyncButton.IsEnabled = !busy;
         BackupButton.IsEnabled = !busy;
         CloudButton.IsEnabled = !busy;
+        SelectButton.IsEnabled = !busy;
+        SelectAllButton.IsEnabled = !busy;
+        RecycleButton.IsEnabled = !busy && _selecting && PhotoGrid.SelectedItems.Count > 0;
     }
 
     private void HandleProgress(JsonElement payload)
@@ -367,6 +372,12 @@ public sealed partial class MainWindow : Window
     }
 
     private async void ScanButton_Click(object sender, RoutedEventArgs e) => await ScanAsync();
+    private async void MediaFilter_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_started || _engine is null) return;
+        try { SearchBox.Text = ""; await BrowseAsync(true); }
+        catch (Exception ex) { ShowError("Cannot filter library", ex); }
+    }
     private async void LibraryButton_Click(object sender, RoutedEventArgs e)
     {
         try { SearchBox.Text = ""; await BrowseAsync(true); }
@@ -389,6 +400,105 @@ public sealed partial class MainWindow : Window
         try { _offset = _photos.Count; await BrowseAsync(reset: false); }
         catch (Exception ex) { ShowError("Cannot load more photos", ex); }
     }
+    private void SelectButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selecting)
+        {
+            PhotoGrid.SelectedItems.Clear();
+            _selecting = false;
+            PhotoGrid.SelectionMode = ListViewSelectionMode.None;
+            PhotoGrid.IsItemClickEnabled = true;
+        }
+        else
+        {
+            PhotoGrid.IsItemClickEnabled = false;
+            _selecting = true;
+            PhotoGrid.SelectionMode = ListViewSelectionMode.Multiple;
+        }
+        SelectButton.Content = _selecting ? "完成选择" : "选择照片";
+        SelectAllButton.Visibility = RecycleButton.Visibility = _selecting ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SelectAllButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selecting) PhotoGrid.SelectAll();
+    }
+
+    private void PhotoGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (RecycleButton is null) return;
+        var count = _selecting ? PhotoGrid.SelectedItems.Count : 0;
+        RecycleButton.Content = $"移到回收站 ({count})";
+        RecycleButton.IsEnabled = !_working && count > 0;
+    }
+
+    private async void RecycleButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_working) return;
+        var selected = PhotoGrid.SelectedItems.OfType<PhotoCard>().ToArray();
+        if (selected.Length == 0) return;
+        SetBusy(true);
+        try
+        {
+            var paths = selected.Select(p => p.Path).ToArray();
+            var plan = await CallAsync("recycle_plan", new { paths });
+            var files = plan.GetProperty("files").EnumerateArray().Select(r => new {
+                Path = Str(r, "path"), Size = r.GetProperty("size").GetInt64(),
+                MtimeNs = r.GetProperty("mtime_ns").GetInt64()
+            }).ToArray();
+            var candidates = plan.GetProperty("candidate_companions").EnumerateArray().Select(r => r.GetString() ?? "").ToArray();
+            var list = string.Join(Environment.NewLine, files.Select(f => f.Path));
+            var confirm = new ContentDialog
+            {
+                Title = $"核对 {files.Length} 个将移到回收站的文件",
+                Content = new ScrollViewer { MaxHeight = 350, Content = new TextBlock { TextWrapping = TextWrapping.Wrap,
+                    Text = $"包含 {candidates.Length} 个同名 Live Photo 配套候选。仅根据同文件夹和文件名推测，并非可靠的 Live Photo 识别；请逐项确认，若有无关视频请取消。\n\n{list}" } },
+                PrimaryButtonText = "文件正确，继续", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Root.XamlRoot
+            };
+            if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+            var final = new ContentDialog
+            {
+                Title = "再次确认移动原文件",
+                Content = $"确定将列出的 {files.Length} 个文件交给 Windows 移到回收站？如果 Windows 提示永久删除，请取消。部分操作失败时可能只移动部分文件。",
+                PrimaryButtonText = "确认移到回收站", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Root.XamlRoot
+            };
+            if (await final.ShowAsync() != ContentDialogResult.Primary) return;
+            // Revalidate identity and protected sync references after the confirmation dialogs.
+            var fresh = await CallAsync("recycle_plan", new { paths });
+            if (fresh.GetProperty("files").GetRawText() != plan.GetProperty("files").GetRawText())
+                throw new IOException("文件或配套候选已变化，请重新选择。");
+            int moved = 0;
+            foreach (var file in files)
+            {
+                try
+                {
+                    var root = Path.GetPathRoot(file.Path);
+                    if (string.IsNullOrEmpty(root) || new DriveInfo(root).DriveType != DriveType.Fixed)
+                        throw new IOException("仅支持本地固定磁盘上的文件");
+                    var info = new FileInfo(file.Path);
+                    long ns = (info.LastWriteTimeUtc.Ticks - DateTime.UnixEpoch.Ticks) * 100;
+                    if (!info.Exists || info.Length != file.Size || ns != file.MtimeNs)
+                        throw new IOException("文件已变化，请重新扫描");
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(file.Path,
+                        Microsoft.VisualBasic.FileIO.UIOption.AllDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin,
+                        Microsoft.VisualBasic.FileIO.UICancelOption.ThrowException);
+                    foreach (var card in _photos.Where(p => string.Equals(p.Path, file.Path, StringComparison.OrdinalIgnoreCase)).ToArray())
+                        _photos.Remove(card);
+                    moved++;
+                }
+                catch (Exception ex)
+                {
+                    await ShowMessageAsync("操作中断", $"已移动 {moved} 个文件；其余未处理。\n{file.Path}\n{ex.Message}\n可在回收站恢复已移动的文件。");
+                    break;
+                }
+            }
+            StatusText.Text = $"已移到回收站: {moved}/{files.Length}。请扫描以更新索引。";
+        }
+        catch (Exception ex) { ShowError("无法准备回收站操作", ex); }
+        finally { SetBusy(false); }
+    }
+
     private void PhotoGrid_ItemClick(object sender, ItemClickEventArgs e)
     {
         if (e.ClickedItem is not PhotoCard photo) return;

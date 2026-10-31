@@ -16,7 +16,9 @@ import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import SKIP_DIRS, SUPPORTED_EXTENSIONS, app_home
-from .file_safety import is_reparse
+from .file_safety import is_reparse, check_path
+
+VIDEO_EXTENSIONS = frozenset({".mov", ".mp4", ".m4v"})
 
 LOG = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 150_000_000
@@ -142,7 +144,7 @@ class PhotoCatalog:
                              Path(root).resolve() in Path(directory, d).resolve(strict=False).parents and
                              Path(directory, d).resolve(strict=False) != cache_root)
             for name in sorted(files):
-                if Path(name).suffix.lower() in SUPPORTED_EXTENSIONS:
+                if Path(name).suffix.lower() in SUPPORTED_EXTENSIONS | VIDEO_EXTENSIONS:
                     path = Path(directory, name)
                     if not is_reparse(path):
                         yield path
@@ -151,6 +153,8 @@ class PhotoCatalog:
         digest = hashlib.sha256((str(path) + ":" + str(mtime_ns)).encode("utf-8")).hexdigest()
         out = self.thumbs_dir / digest[:2] / (digest + ".jpg")
         out.parent.mkdir(exist_ok=True, parents=True)
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            return "", 0, 0, None
         try:
             with Image.open(path) as src:
                 image = ImageOps.exif_transpose(src)
@@ -283,7 +287,7 @@ class PhotoCatalog:
                         continue
                     if was_updated:
                         updated += 1
-                    if not decodable:
+                    if not decodable and path.suffix.lower() not in VIDEO_EXTENSIONS:
                         errors += 1  # Every currently undecodable file, changed or not.
                     if encoder is not None and decodable:
                         has_embedding = db.execute(
@@ -322,13 +326,60 @@ class PhotoCatalog:
             progress({"stage": "complete", **result})
         return result
 
-    def browse(self, limit: int = 120, offset: int = 0) -> list[dict]:
+    def browse(self, limit: int = 120, offset: int = 0, media_type: str = "all") -> list[dict]:
+        if media_type not in {"all", "photo", "video"}:
+            raise ValueError("Invalid media type")
+        video = "(lower(path) LIKE '%.mov' OR lower(path) LIKE '%.mp4' OR lower(path) LIKE '%.m4v')"
+        where = "" if media_type == "all" else "WHERE " + (video if media_type == "video" else "NOT " + video)
         with self.connection() as db:
-            rows = db.execute("""
+            rows = db.execute(f"""
                 SELECT id,path,name,thumb_path,mtime_ns,taken_at,width,height,error FROM photos
-                ORDER BY mtime_ns DESC,id DESC LIMIT ? OFFSET ?
+                {where} ORDER BY mtime_ns DESC,id DESC LIMIT ? OFFSET ?
             """, (max(1, min(int(limit), 300)), max(0, int(offset)))).fetchall()
             return [dict(row) for row in rows]
+
+    def recycle_plan(self, paths: list[str]) -> dict:
+        """Resolve candidate Live Photo pairs; never move files here."""
+        if not isinstance(paths, list) or not paths or len(paths) > 1000:
+            raise ValueError("Select between 1 and 1000 files")
+        with self.connection() as db:
+            rows = [dict(r) for r in db.execute("SELECT path, size, mtime_ns FROM photos")]
+            has_sync = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_transfers'").fetchone()
+            sync = {os.path.normcase(os.path.abspath(r[0])) for r in db.execute(
+                "SELECT stored_path FROM sync_transfers WHERE stored_path IS NOT NULL")} if has_sync else set()
+        by_path = {os.path.normcase(os.path.abspath(r['path'])): r for r in rows}
+        groups = {}
+        for row in rows:
+            path = Path(row['path'])
+            groups.setdefault((os.path.normcase(str(path.parent)), path.stem.casefold()), []).append(row)
+        chosen = {}
+        candidates = []
+        for raw in paths:
+            key = os.path.normcase(os.path.abspath(raw))
+            if key not in by_path:
+                raise ValueError("File is no longer in the catalog: " + raw)
+            row = by_path[key]
+            chosen[key] = row
+            p = Path(row['path'])
+            suffix = p.suffix.lower()
+            if suffix not in {'.heic', '.heif', '.jpg', '.jpeg', '.mov'}:
+                continue
+            wanted = {'.mov'} if suffix != '.mov' else {'.heic', '.heif', '.jpg', '.jpeg'}
+            matches = [r for r in groups.get((os.path.normcase(str(p.parent)), p.stem.casefold()), [])
+                       if Path(r['path']).suffix.lower() in wanted]
+            for companion in matches:
+                other = os.path.normcase(os.path.abspath(companion['path']))
+                if other not in chosen:
+                    chosen[other] = companion
+                    candidates.append(companion['path'])
+        for key, row in chosen.items():
+            if key in sync:
+                raise ValueError("Synced/shared resource protected; deletion unavailable: " + row['path'])
+            path = check_path(Path(row['path']))
+            info = path.stat()
+            if not path.is_file() or info.st_size != row['size'] or info.st_mtime_ns != row['mtime_ns']:
+                raise ValueError("File changed since scan; scan again: " + str(path))
+        return {"files": list(chosen.values()), "candidate_companions": candidates}
 
     def stats(self, model_id: str | None = None) -> dict:
         with self.connection() as db:

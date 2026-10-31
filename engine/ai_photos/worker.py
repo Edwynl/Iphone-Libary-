@@ -123,10 +123,12 @@ class Worker:
                 data = {"folders": self.catalog.folders()}
             elif action == "remove_folder":
                 data = self.catalog.remove_folder(params["path"])
+            elif action == "recycle_plan":
+                data = self.catalog.recycle_plan(params["paths"])
             elif action == "organize":
                 data = virtual_albums(self.catalog)
             elif action == "browse":
-                data = {"photos": self.catalog.browse(params.get("limit", 120), params.get("offset", 0))}
+                data = {"photos": self.catalog.browse(params.get("limit", 120), params.get("offset", 0), params.get("media_type", "all"))}
             elif action == "search":
                 encoder = self.encoder if self.encoder.installed else None
                 data = self.catalog.search(params.get("query", ""), params.get("limit", 120), encoder)
