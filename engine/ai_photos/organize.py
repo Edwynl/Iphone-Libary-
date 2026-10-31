@@ -13,7 +13,8 @@ def virtual_albums(catalog: PhotoCatalog) -> dict:
     folders = defaultdict(int)
     formats = defaultdict(int)
     with catalog.connection() as db:
-        rows = db.execute("SELECT id,name,folder,taken_at,mtime_ns FROM photos ORDER BY mtime_ns DESC,id DESC")
+        rows = db.execute("SELECT id,name,folder,taken_at,mtime_ns FROM photos WHERE media_kind!='live_motion' "
+                          "ORDER BY mtime_ns DESC,id DESC")
         for r in rows:
             timestamp = r["taken_at"] or ""
             # EXIF DateTimeOriginal format: YYYY:MM:DD HH:MM:SS

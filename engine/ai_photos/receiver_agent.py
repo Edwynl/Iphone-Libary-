@@ -214,7 +214,9 @@ class ReceiverController:
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             close_fds=True, env=dict(os.environ, AI_PHOTOS_HOME=str(self.home)))
         if os.name == 'nt':
-            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            # A hidden console rather than DETACHED_PROCESS: a venv python.exe is a
+            # launcher whose real interpreter would otherwise open a visible console.
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
             try:
                 child = subprocess.Popen(arguments, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **common)
             except OSError as exc:

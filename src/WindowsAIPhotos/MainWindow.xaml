@@ -151,11 +151,18 @@
           <GridView.ItemTemplate>
             <DataTemplate>
               <StackPanel Width="185" Spacing="6" Padding="5">
-                <Border Width="175" Height="142" CornerRadius="8"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                  <Image Source="{Binding Thumbnail}" Width="175" Height="142"
-                         Stretch="UniformToFill"/>
-                </Border>
+                <Grid Width="175" Height="142">
+                  <Border CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                    <Image Source="{Binding Thumbnail}" Width="175" Height="142"
+                           Stretch="UniformToFill"/>
+                  </Border>
+                  <FontIcon Glyph="&#xE768;" FontSize="36" Opacity="{Binding PlaceholderOpacity}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  <Border Opacity="{Binding BadgeOpacity}" Background="#B0000000" CornerRadius="4"
+                          Padding="6,2" Margin="6" HorizontalAlignment="Left" VerticalAlignment="Top">
+                    <TextBlock Text="{Binding Badge}" FontSize="11" Foreground="White"/>
+                  </Border>
+                </Grid>
                 <TextBlock Text="{Binding FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
                 <TextBlock Text="{Binding Subtitle}" FontSize="11" Opacity="0.6"/>
               </StackPanel>

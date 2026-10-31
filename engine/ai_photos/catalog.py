@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -17,8 +18,13 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import SKIP_DIRS, SUPPORTED_EXTENSIONS, app_home
 from .file_safety import is_reparse, check_path
+from .media import VIDEO_EXTENSIONS, probe_video, video_thumbnail
 
-VIDEO_EXTENSIONS = frozenset({".mov", ".mp4", ".m4v"})
+LIVE_STILL_EXTENSIONS = frozenset({".heic", ".heif", ".jpg", ".jpeg"})
+# Live Photo motion files are kept (backups, recycle pairing) but shown through their still.
+_VISIBLE = "media_kind!='live_motion'"
+_COLUMNS = "id,path,name,thumb_path,mtime_ns,taken_at,width,height,error,media_kind,companion"
+_FILENAME_QUERY = re.compile(r"[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*")
 
 LOG = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 150_000_000
@@ -93,6 +99,15 @@ class PhotoCatalog:
                 );
                 CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_id);
             """)
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(photos)")}
+            for name, declaration in (("media_kind", "TEXT NOT NULL DEFAULT 'photo'"),
+                                      ("live_meta", "INTEGER"), ("companion", "TEXT")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE photos ADD COLUMN {name} {declaration}")
+            if "media_kind" not in columns:
+                db.execute("UPDATE photos SET media_kind='video' WHERE " + " OR ".join(
+                    f"lower(path) LIKE '%{suffix}'" for suffix in sorted(VIDEO_EXTENSIONS)))
+            db.execute("CREATE INDEX IF NOT EXISTS idx_photos_kind ON photos(media_kind, mtime_ns DESC, id DESC)")
 
     def add_folder(self, folder: str) -> dict:
         path = Path(folder).expanduser().resolve(strict=True)
@@ -149,12 +164,20 @@ class PhotoCatalog:
                     if not is_reparse(path):
                         yield path
 
-    def _thumb(self, path: Path, mtime_ns: int) -> tuple[str, int, int, str | None]:
+    def _thumb_path(self, path: Path, mtime_ns: int) -> Path:
         digest = hashlib.sha256((str(path) + ":" + str(mtime_ns)).encode("utf-8")).hexdigest()
-        out = self.thumbs_dir / digest[:2] / (digest + ".jpg")
+        return self.thumbs_dir / digest[:2] / (digest + ".jpg")
+
+    def _thumb(self, path: Path, mtime_ns: int) -> tuple[str, int, int, str | None]:
+        out = self._thumb_path(path, mtime_ns)
         out.parent.mkdir(exist_ok=True, parents=True)
         if path.suffix.lower() in VIDEO_EXTENSIONS:
-            return "", 0, 0, None
+            # A poster frame when Windows has a codec; never an error for videos.
+            if out.is_file():
+                return str(out), 0, 0, None
+            if probe_video(path)[0]:
+                return "", 0, 0, None  # Live Photo motion: shown through its still.
+            return (str(out) if video_thumbnail(path, out) else ""), 0, 0, None
         try:
             with Image.open(path) as src:
                 image = ImageOps.exif_transpose(src)
@@ -196,15 +219,18 @@ class PhotoCatalog:
                 return previous["id"], False, False
             error = None if thumbnail else taken_or_error
             taken = taken_or_error if thumbnail else None
+            # A changed video is probed again for Live Photo metadata after the walk.
             db.execute("""
-                INSERT INTO photos(path,folder,name,size,mtime_ns,taken_at,width,height,thumb_path,error,indexed_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO photos(path,folder,name,size,mtime_ns,taken_at,width,height,thumb_path,error,indexed_at,media_kind,live_meta)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)
                 ON CONFLICT(path) DO UPDATE SET folder=excluded.folder,name=excluded.name,
                   size=excluded.size,mtime_ns=excluded.mtime_ns,taken_at=excluded.taken_at,
                   width=excluded.width,height=excluded.height,thumb_path=excluded.thumb_path,
-                  error=excluded.error,indexed_at=excluded.indexed_at
+                  error=excluded.error,indexed_at=excluded.indexed_at,
+                  media_kind=excluded.media_kind,live_meta=NULL
             """, (p, root, previous['name'] if previous else path.name, stat.st_size, stat.st_mtime_ns, taken, width, height,
-                  thumbnail, error, datetime.now(timezone.utc).isoformat()))
+                  thumbnail, error, datetime.now(timezone.utc).isoformat(),
+                  'video' if path.suffix.lower() in VIDEO_EXTENSIONS else 'photo'))
             photo_id = db.execute("SELECT id FROM photos WHERE path=?", (p,)).fetchone()["id"]
             if previous:
                 db.execute("DELETE FROM embeddings WHERE photo_id=?", (photo_id,))
@@ -294,7 +320,12 @@ class PhotoCatalog:
                             "SELECT 1 FROM embeddings WHERE photo_id=? AND model_id=?",
                             (photo_id, model_id)).fetchone()
                         if not has_embedding:
-                            embed_queue.append((photo_id, p))
+                            source = p
+                            if path.suffix.lower() in VIDEO_EXTENSIONS:
+                                # A video is searchable through its poster frame.
+                                source = db.execute("SELECT thumb_path FROM photos WHERE id=?",
+                                                    (photo_id,)).fetchone()[0]
+                            embed_queue.append((photo_id, source))
                             if len(embed_queue) >= 8:
                                 flush_embed_queue()
                     if seen % 25 == 0:
@@ -320,21 +351,57 @@ class PhotoCatalog:
                     progress({"stage": "warning", "folder": root,
                               "message": "Incomplete scan; existing photo records retained"})
                 db.commit()
+            self._link_live_photos(db)
         result = {"seen": seen, "updated": updated, "embedded": embedded,
                   "removed": removed, "errors": errors, "elapsed_sec": round(time.monotonic() - t0, 2)}
         if progress:
             progress({"stage": "complete", **result})
         return result
 
+    def _link_live_photos(self, db: sqlite3.Connection) -> None:
+        """Classify videos: a Live Photo motion file needs Apple's identifier and a same-stem still."""
+        pending = db.execute("SELECT id,path FROM photos WHERE media_kind!='photo' AND live_meta IS NULL").fetchall()
+        db.commit()  # Probing reads files; hold no writer meanwhile.
+        probed = [(row["id"], *probe_video(Path(row["path"]))) for row in pending]
+        for photo_id, live, taken in probed:
+            if live is not None:  # Unreadable now (offline/denied): retry on a later scan.
+                db.execute("UPDATE photos SET live_meta=?,taken_at=COALESCE(?,taken_at) WHERE id=?",
+                           (int(live), taken, photo_id))
+        stills = {}
+        for row in db.execute("SELECT path FROM photos WHERE media_kind='photo'"):
+            path = Path(row["path"])
+            if path.suffix.lower() in LIVE_STILL_EXTENSIONS:
+                stills.setdefault((os.path.normcase(str(path.parent)), path.stem.casefold()), row["path"])
+        db.execute("UPDATE photos SET companion=NULL WHERE companion IS NOT NULL")
+        for row in db.execute("SELECT id,path,live_meta FROM photos WHERE media_kind!='photo'").fetchall():
+            path = Path(row["path"])
+            still = stills.get((os.path.normcase(str(path.parent)), path.stem.casefold())) if row["live_meta"] else None
+            db.execute("UPDATE photos SET media_kind=?,companion=? WHERE id=?",
+                       ("live_motion" if still else "video", still, row["id"]))
+            if still:
+                db.execute("UPDATE photos SET companion=? WHERE path=?", (row["path"], still))
+        db.commit()
+        # Visible videos still without a poster: catalogs from older versions,
+        # Live clips whose still is gone, or a codec installed since. Cheap to retry.
+        missing = db.execute("""SELECT id,path,mtime_ns FROM photos
+                                WHERE media_kind='video' AND COALESCE(thumb_path,'')=''""").fetchall()
+        db.commit()
+        posters = []
+        for row in missing:
+            out = self._thumb_path(Path(row["path"]), row["mtime_ns"])
+            if out.is_file() or video_thumbnail(Path(row["path"]), out):
+                posters.append((str(out), row["id"]))
+        db.executemany("UPDATE photos SET thumb_path=? WHERE id=?", posters)
+        db.commit()
+
     def browse(self, limit: int = 120, offset: int = 0, media_type: str = "all") -> list[dict]:
         if media_type not in {"all", "photo", "video"}:
             raise ValueError("Invalid media type")
-        video = "(lower(path) LIKE '%.mov' OR lower(path) LIKE '%.mp4' OR lower(path) LIKE '%.m4v')"
-        where = "" if media_type == "all" else "WHERE " + (video if media_type == "video" else "NOT " + video)
+        where = _VISIBLE if media_type == "all" else f"media_kind='{media_type}'"
         with self.connection() as db:
             rows = db.execute(f"""
-                SELECT id,path,name,thumb_path,mtime_ns,taken_at,width,height,error FROM photos
-                {where} ORDER BY mtime_ns DESC,id DESC LIMIT ? OFFSET ?
+                SELECT {_COLUMNS} FROM photos
+                WHERE {where} ORDER BY mtime_ns DESC,id DESC LIMIT ? OFFSET ?
             """, (max(1, min(int(limit), 300)), max(0, int(offset)))).fetchall()
             return [dict(row) for row in rows]
 
@@ -344,6 +411,9 @@ class PhotoCatalog:
             raise ValueError("Select between 1 and 1000 files")
         with self.connection() as db:
             rows = [dict(r) for r in db.execute("SELECT path, size, mtime_ns FROM photos")]
+            # Pairs confirmed by the Live Photo identifier during scan.
+            links = {os.path.normcase(r[0]): os.path.normcase(r[1]) for r in db.execute(
+                "SELECT path, companion FROM photos WHERE companion IS NOT NULL")}
             has_sync = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_transfers'").fetchone()
             sync = {os.path.normcase(os.path.abspath(r[0])) for r in db.execute(
                 "SELECT stored_path FROM sync_transfers WHERE stored_path IS NOT NULL")} if has_sync else set()
@@ -354,6 +424,7 @@ class PhotoCatalog:
             groups.setdefault((os.path.normcase(str(path.parent)), path.stem.casefold()), []).append(row)
         chosen = {}
         candidates = []
+        confirmed = []
         for raw in paths:
             key = os.path.normcase(os.path.abspath(raw))
             if key not in by_path:
@@ -372,6 +443,8 @@ class PhotoCatalog:
                 if other not in chosen:
                     chosen[other] = companion
                     candidates.append(companion['path'])
+                    if links.get(os.path.normcase(row['path'])) == os.path.normcase(companion['path']):
+                        confirmed.append(companion['path'])
         for key, row in chosen.items():
             if key in sync:
                 raise ValueError("Synced/shared resource protected; deletion unavailable: " + row['path'])
@@ -379,14 +452,16 @@ class PhotoCatalog:
             info = path.stat()
             if not path.is_file() or info.st_size != row['size'] or info.st_mtime_ns != row['mtime_ns']:
                 raise ValueError("File changed since scan; scan again: " + str(path))
-        return {"files": list(chosen.values()), "candidate_companions": candidates}
+        return {"files": list(chosen.values()), "candidate_companions": candidates,
+                "confirmed_companions": confirmed}
 
     def stats(self, model_id: str | None = None) -> dict:
         with self.connection() as db:
-            count = db.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+            count, videos, live = db.execute("""SELECT COALESCE(SUM(media_kind='photo'),0), COALESCE(SUM(media_kind='video'),0),
+                COALESCE(SUM(media_kind='photo' AND companion IS NOT NULL),0) FROM photos""").fetchone()
             failures = db.execute("SELECT COUNT(*) FROM photos WHERE error IS NOT NULL").fetchone()[0]
             vectors = db.execute("SELECT COUNT(*) FROM embeddings WHERE model_id=?", (model_id,)).fetchone()[0] if model_id else 0
-            return {"photos": count, "folders": len(self.folders()), "errors": failures,
+            return {"photos": count, "videos": videos, "live_photos": live, "folders": len(self.folders()), "errors": failures,
                     "embeddings": vectors, "db_bytes": self.db_path.stat().st_size}
 
     def search(self, query: str, limit: int = 120, encoder=None) -> dict:
@@ -396,7 +471,14 @@ class PhotoCatalog:
             return {"mode": "browse", "photos": self.browse(limit)}
         if encoder is not None:
             try:
-                return {"mode": "semantic", "photos": self._semantic(query, limit, encoder)}
+                # Typed filenames (e.g. IMG_3164) come first; the model cannot match them.
+                named = self._by_name(query, limit, names_only=True)
+                if named and _FILENAME_QUERY.fullmatch(query):
+                    # IMG_3164-style queries want those files, not look-alike pictures.
+                    return {"mode": "semantic", "filename_matches": len(named), "photos": named}
+                ids = {p["id"] for p in named}
+                ranked = [p for p in self._semantic(query, limit, encoder) if p["id"] not in ids]
+                return {"mode": "semantic", "filename_matches": len(named), "photos": (named + ranked)[:limit]}
             except Exception as exc:
                 LOG.exception("Semantic search failed; falling back to filename matching")
                 # Report fallback transparently; not silently claim AI results.
@@ -404,16 +486,18 @@ class PhotoCatalog:
         return {"mode": "filename", "warning": "AI not installed; only filenames/paths searched",
                 "photos": self._by_name(query, limit)}
 
-    def _by_name(self, query: str, limit: int) -> list[dict]:
+    def _by_name(self, query: str, limit: int, names_only: bool = False) -> list[dict]:
         # ESCAPE prevents '%'/'_' from acting as wildcards in user input.
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = "%" + escaped + "%"
+        # Beside AI results, a folder name such as 2026.09.19 must not match every file.
+        where = "name LIKE ? ESCAPE '\\'" if names_only else "(name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')"
         with self.connection() as db:
-            return [dict(row) for row in db.execute("""
-                SELECT id,path,name,thumb_path,mtime_ns,taken_at,width,height,error FROM photos
-                WHERE name LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\'
+            return [dict(row) for row in db.execute(f"""
+                SELECT {_COLUMNS} FROM photos
+                WHERE {where} AND {_VISIBLE}
                 ORDER BY mtime_ns DESC,id DESC LIMIT ?
-            """, (pattern, pattern, limit))]
+            """, (pattern, limit) if names_only else (pattern, pattern, limit))]
 
     def _semantic(self, query: str, limit: int, encoder) -> list[dict]:
         probe = np.asarray(encoder.embed_text(query), dtype=np.float32).reshape(-1)
@@ -423,7 +507,7 @@ class PhotoCatalog:
         with self.connection() as db:
             for r in db.execute("""
                 SELECT p.id,p.path,p.name,p.thumb_path,p.mtime_ns,p.taken_at,p.width,p.height,p.error,
-                       e.dimensions,e.vector FROM embeddings e
+                       p.media_kind,p.companion,e.dimensions,e.vector FROM embeddings e
                 JOIN photos p ON p.id=e.photo_id WHERE e.model_id=?
             """, (encoder.model_id,)):
                 if r["dimensions"] != probe.size:
@@ -432,7 +516,7 @@ class PhotoCatalog:
                 if v.size != probe.size:
                     continue
                 vectors.append(v)
-                metadata.append({k: r[k] for k in ("id", "path", "name", "thumb_path", "mtime_ns", "taken_at", "width", "height", "error")})
+                metadata.append({k: r[k] for k in _COLUMNS.split(",")})
         if not vectors:
             return []
         matrix = np.stack(vectors).astype(np.float32, copy=False)

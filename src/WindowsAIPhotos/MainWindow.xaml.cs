@@ -62,8 +62,10 @@ public sealed partial class MainWindow : Window
         int count = data.GetProperty("photos").GetInt32();
         int embedded = data.GetProperty("embeddings").GetInt32();
         bool installed = data.GetProperty("ai_installed").GetBoolean();
-        PhotoCount.Text = $"{count:N0} photos";
-        AiState.Text = installed ? $"Ready · {embedded:N0}/{count:N0} AI-indexed"
+        int videos = data.TryGetProperty("videos", out var v) ? v.GetInt32() : 0;
+        int live = data.TryGetProperty("live_photos", out var l) ? l.GetInt32() : 0;
+        PhotoCount.Text = $"{count:N0} 张照片（{live:N0} 实况） · {videos:N0} 个视频";
+        AiState.Text = installed ? $"Ready · {embedded:N0}/{count + videos:N0} AI-indexed"
                                  : "Not installed · filename search only";
         if (data.TryGetProperty("ai_error", out var aiError) && !string.IsNullOrEmpty(aiError.GetString()))
             AiState.Text = "AI unavailable — repair/install: " + aiError.GetString();
@@ -92,7 +94,9 @@ public sealed partial class MainWindow : Window
             if (path.Length == 0) continue;
             var date = row.TryGetProperty("mtime_ns", out var element) && element.TryGetInt64(out var ns)
                 ? ns : 0;
-            _photos.Add(PhotoCard.Create(path, Str(row, "name"), Str(row, "thumb_path"), date, Str(row, "taken_at")));
+            var card = PhotoCard.Create(path, Str(row, "name"), Str(row, "thumb_path"), date, Str(row, "taken_at"),
+                Str(row, "media_kind"), Str(row, "companion"));
+            _photos.Add(card);
         }
         EmptyState.Visibility = _photos.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Text = _folders.Count == 0 ? "Choose Add photo folder to begin."
@@ -109,7 +113,7 @@ public sealed partial class MainWindow : Window
         DisplayPhotos(result.GetProperty("photos"), append: !reset);
         PageTitle.Text = MediaType == "video" ? "Videos / 视频" : MediaType == "photo" ? "Photos / 照片" : "All media / 全部";
         StatusText.Text = _photos.Count == 0 ? "Add a local folder to start scanning."
-            : $"Showing {_photos.Count:N0} local photos. Select an image to open its original file.";
+            : $"已显示 {_photos.Count:N0} 项。点击打开原文件；实况照片的视频部分随照片一起管理。";
     }
 
     private async Task SearchAsync()
@@ -122,9 +126,14 @@ public sealed partial class MainWindow : Window
         DisplayPhotos(result.GetProperty("photos"), append: false);
         string mode = Str(result, "mode");
         PageTitle.Text = "Search Results";
-        StatusText.Text = mode == "semantic"
-            ? $"AI semantic search · {_photos.Count} results for \"{query}\""
-            : $"Filename search only · {_photos.Count} results · Install AI for image-content search";
+        int named = result.TryGetProperty("filename_matches", out var n) ? n.GetInt32() : 0;
+        if (mode != "semantic")
+            StatusText.Text = $"Filename search only · {_photos.Count} results · Install AI for image-content search";
+        else if (named > 0 && named == _photos.Count)
+            StatusText.Text = $"文件名匹配 · {named} 个结果";
+        else
+            StatusText.Text = $"AI semantic search · {_photos.Count} results for \"{query}\"" +
+                (named > 0 ? $" · 前 {named} 个为文件名匹配" : "");
         if (result.TryGetProperty("warning", out var warning) && warning.ValueKind == JsonValueKind.String)
             StatusText.Text += " · " + warning.GetString();
     }
@@ -174,7 +183,13 @@ public sealed partial class MainWindow : Window
         {
             int count = payload.TryGetProperty("seen", out var seen) ? seen.GetInt32() : 0;
             int ai = payload.TryGetProperty("embedded", out var embeds) ? embeds.GetInt32() : 0;
-            StatusText.Text = $"Scanning {count:N0} photos · {ai:N0} AI indexed";
+            StatusText.Text = $"正在扫描 {count:N0} 个文件 · {ai:N0} AI indexed";
+        }
+        else if (stage == "fingerprinting")
+        {
+            int done = payload.TryGetProperty("done", out var d) ? d.GetInt32() : 0;
+            int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
+            StatusText.Text = $"正在比对重复文件 {done:N0}/{total:N0}（首次需读取全部视频，较慢）· 原文件不会被删除";
         }
         else if (stage == "installing")
             StatusText.Text = "Downloading AI model to your computer (one-time operation)...";
@@ -260,7 +275,7 @@ public sealed partial class MainWindow : Window
             var data = await CallAsync("organize");
             var entries = data.GetProperty("timeline");
             var lines = entries.EnumerateArray().Take(24).Select(p =>
-                $"{Str(p, "month")}: {p.GetProperty("count").GetInt32():N0} photos");
+                $"{Str(p, "month")}: {p.GetProperty("count").GetInt32():N0} 项");
             await ShowMessageAsync("Virtual photo timeline",
                 "Grouped by EXIF capture month, or file date where unavailable." +
                 Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, lines) +
@@ -292,6 +307,9 @@ public sealed partial class MainWindow : Window
                 if (shown++ >= 8) break;
                 lines.Add("- " + string.Join(" | ", group.EnumerateArray().Select(p => Str(p, "name"))));
             }
+            if (similar.GetArrayLength() > 0) lines.AddRange(new[] { "", "相似照片（前 20 组，请人工核对）：" });
+            foreach (var group in similar.EnumerateArray().Take(20))
+                lines.Add("- " + string.Join(" | ", group.EnumerateArray().Select(p => Str(p, "name"))));
             await ShowMessageAsync("Duplicate photo review", string.Join(Environment.NewLine, lines));
             StatusText.Text = "Duplicate analysis finished. Photo originals remain untouched.";
         }
@@ -447,12 +465,17 @@ public sealed partial class MainWindow : Window
                 MtimeNs = r.GetProperty("mtime_ns").GetInt64()
             }).ToArray();
             var candidates = plan.GetProperty("candidate_companions").EnumerateArray().Select(r => r.GetString() ?? "").ToArray();
+            int confirmed = plan.TryGetProperty("confirmed_companions", out var c) ? c.GetArrayLength() : 0;
             var list = string.Join(Environment.NewLine, files.Select(f => f.Path));
+            string pairing = (confirmed > 0 ? $"包含 {confirmed} 个实况照片的视频部分（已用 Apple 实况元数据确认）。" : "") +
+                (candidates.Length > confirmed
+                    ? $"另有 {candidates.Length - confirmed} 个同名配套文件仅按文件夹和文件名推测，并非可靠识别；若有无关视频请取消。"
+                    : "");
             var confirm = new ContentDialog
             {
                 Title = $"核对 {files.Length} 个将移到回收站的文件",
                 Content = new ScrollViewer { MaxHeight = 350, Content = new TextBlock { TextWrapping = TextWrapping.Wrap,
-                    Text = $"包含 {candidates.Length} 个同名 Live Photo 配套候选。仅根据同文件夹和文件名推测，并非可靠的 Live Photo 识别；请逐项确认，若有无关视频请取消。\n\n{list}" } },
+                    Text = $"{pairing}请逐项核对。\n\n{list}" } },
                 PrimaryButtonText = "文件正确，继续", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close, XamlRoot = Root.XamlRoot
             };
             if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;

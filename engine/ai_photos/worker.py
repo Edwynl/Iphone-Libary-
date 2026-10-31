@@ -60,7 +60,8 @@ class Worker:
                     self.encoder.install()
                     result = {"installed": True}
                 elif action == "duplicates":
-                    result = find_duplicates(self.catalog, similar_distance=int(params.get("distance", 4)))
+                    result = find_duplicates(self.catalog, similar_distance=int(params.get("distance", 4)),
+                                             progress=lambda e: self.send({"event": "progress", "data": e}))
                 elif action == "backup_local":
                     result = backup_local(self.catalog, params["target"], apply=bool(params.get("apply", False)))
                 elif action == "backup_s3":
