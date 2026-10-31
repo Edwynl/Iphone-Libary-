@@ -401,25 +401,36 @@ class SyncManager:
                            (utcnow(), transfer_id))
             source.unlink(missing_ok=True)
             raise SyncFailure(422, 'Final SHA-256 mismatch, transfer reset')
+        private_written = existing is None
+        publish = private_written
         try:
-            with self.lock, self.catalog.connection() as db:
-                # Revoke/pause may have happened during the unlocked copy. On
-                # refusal nothing becomes visible in the import folder and the
-                # staged bytes are kept for a later retry.
-                self._ensure_device(db, row['device_id'])
-                if self._paused(db):
-                    raise SyncFailure(423, 'Sync is paused by Windows owner')
-                current = db.execute('SELECT status,offset FROM sync_transfers WHERE id=?', (transfer_id,)).fetchone()
-                if current is None or current['status'] != 'pending' or current['offset'] != row['size']:
-                    raise SyncFailure(409, 'Transfer changed while finalizing; retrieve its status')
-                if existing is None:
+            while True:
+                with self.lock, self.catalog.connection() as db:
+                    # Revoke/pause may have happened during the unlocked copy. On
+                    # refusal nothing becomes visible in the import folder and the
+                    # staged bytes are kept for a later retry.
+                    self._ensure_device(db, row['device_id'])
+                    if self._paused(db):
+                        raise SyncFailure(423, 'Sync is paused by Windows owner')
+                    current = db.execute('SELECT status,offset FROM sync_transfers WHERE id=?', (transfer_id,)).fetchone()
+                    if current is None or current['status'] != 'pending' or current['offset'] != row['size']:
+                        raise SyncFailure(409, 'Transfer changed while finalizing; retrieve its status')
                     # Publish before the commit: after a crash in between, the
                     # retry finds these verified bytes and reuses them.
-                    dest = self._publish(private_name, dest, row['sha256'], extension)
-                db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
-                           (str(dest), utcnow(), transfer_id))
+                    if not publish or self._publish(private_name, dest):
+                        db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
+                                   (str(dest), utcnow(), transfer_id))
+                        break
+                # Another transfer published this name meanwhile. Hash it
+                # without the lock, then recheck everything above again.
+                with SafeDirectory(dest_dir) as directory:
+                    same = directory.digest(dest.name) == row['sha256']
+                if same:
+                    publish = False
+                else:
+                    dest = dest_dir / (row['sha256'] + '-recovered-' + secrets.token_hex(8) + extension)
         finally:
-            if existing is None:
+            if private_written:
                 with SafeDirectory(dest_dir) as directory:
                     try:
                         directory._unlink(private_name)
@@ -430,18 +441,14 @@ class SyncManager:
         return dest
 
     @staticmethod
-    def _publish(private_name, dest, digest, extension) -> Path:
+    def _publish(private_name, dest) -> bool:
+        """Atomic same-directory rename; False (no hashing here) if dest exists."""
         with SafeDirectory(dest.parent) as directory:
             try:
                 directory._commit(private_name, dest.name, False)  # Never replaces.
-                return dest
+                return True
             except FileExistsError:
-                pass
-            if directory.digest(dest.name) == digest:
-                return dest  # The same bytes were published concurrently.
-            dest = dest.parent / (digest + '-recovered-' + secrets.token_hex(8) + extension)
-            directory._commit(private_name, dest.name, False)
-            return dest
+                return False
 
     def complete(self, device_id: str, transfer_id: str) -> dict:
         with self.lock:

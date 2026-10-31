@@ -331,6 +331,52 @@ def test_revoke_or_pause_during_unlocked_copy_publishes_nothing(tmp_path, interr
         assert len(visible_imports(manager)) == 1
 
 
+def test_same_content_publish_collision_hashes_without_the_global_lock(tmp_path):
+    _, manager, _ = manager_at(tmp_path)
+    data = b'same original video'
+    tids = []
+    for device in ('device-first-123', 'device-second-123'):
+        manager.pair(device, device)
+        tids.append((device, staged(manager, device, data, asset='asset')))
+    both_copied, hashing, release = threading.Barrier(2), threading.Event(), threading.Event()
+    copy, digest = SafeDirectory.copy, SafeDirectory.digest
+    collided = threading.local()
+
+    def copy_then_wait(self, *args, **kwargs):
+        result = copy(self, *args, **kwargs)
+        both_copied.wait(10)  # Both private copies exist before either publishes.
+        collided.after_copy = True
+        return result
+
+    def slow_collision_digest(self, name):
+        if getattr(collided, 'after_copy', False):  # Only the post-collision hash.
+            hashing.set()
+            release.wait(10)
+        return digest(self, name)
+
+    results = []
+    with patch.object(SafeDirectory, 'copy', copy_then_wait), \
+            patch.object(SafeDirectory, 'digest', slow_collision_digest):
+        threads = [threading.Thread(target=lambda d=d, t=t: results.append(manager.complete(d, t)))
+                   for d, t in tids]
+        for thread in threads:
+            thread.start()
+        assert hashing.wait(10)
+        try:
+            paused = threading.Thread(target=manager.set_paused, args=(False,))
+            paused.start()
+            paused.join(2)
+            assert not paused.is_alive()  # The global lock is free during the hash.
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(10)
+    assert [r['status'] for r in results] == ['complete', 'complete']
+    stored = {manager.status(d, t)['status'] for d, t in tids}
+    assert stored == {'complete'}
+    assert len(visible_imports(manager)) == 1 and not list(manager.inbox.rglob('*.verified'))
+
+
 def test_start_timeout_stops_its_own_child_before_releasing_control(tmp_path, monkeypatch):
     from ai_photos import receiver_agent
     real = receiver_agent.subprocess.Popen
