@@ -496,7 +496,7 @@ public sealed partial class MainWindow : Window
         int exact = _duplicateGroups.Count(g => g.Exact);
         int selected = _duplicateGroups.Sum(g => g.Photos.Count(p => p.IsSelected));
         DuplicateSummary.Text = $"完全相同 {exact} 组 · 相似 {_duplicateGroups.Count - exact} 组。" +
-            "点击照片选中，双击打开原图比较；不会自动删除任何文件。";
+            "点击照片选中，双击放大比较（← → 切换同组照片）；不会自动删除任何文件。";
         DuplicateRecycleButton.Content = $"移到回收站 ({selected})";
         DuplicateRecycleButton.IsEnabled = !_working && selected > 0;
         SelectExtrasButton.IsEnabled = !_working && exact > 0;
@@ -509,10 +509,11 @@ public sealed partial class MainWindow : Window
         UpdateDuplicateSelection();
     }
 
-    // Two clicks first toggle the mark twice, leaving it as it was.
+    // Two clicks first toggle the mark twice, leaving it as it was. The viewer steps through the group.
     private void DuplicateCard_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
-        if ((e.OriginalSource as FrameworkElement)?.DataContext is PhotoCard card) OpenOriginal(card);
+        if ((e.OriginalSource as FrameworkElement)?.DataContext is not PhotoCard card) return;
+        if (_duplicateGroups.FirstOrDefault(g => g.Photos.Contains(card)) is { } group) OpenViewer(group.Photos, card);
     }
 
     // Byte-identical copies: keep the first of each group. Similar photos are never picked for the user.
@@ -792,7 +793,7 @@ public sealed partial class MainWindow : Window
 
     private void PhotoGrid_ItemClick(object sender, ItemClickEventArgs e)
     {
-        if (e.ClickedItem is PhotoCard photo) OpenOriginal(photo);
+        if (e.ClickedItem is PhotoCard photo) OpenViewer(_photos, photo);
     }
 
     private void OpenOriginal(PhotoCard photo)

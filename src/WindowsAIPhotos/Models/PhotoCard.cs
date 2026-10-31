@@ -31,6 +31,8 @@ public sealed class PhotoCard : INotifyPropertyChanged
     public BitmapImage? CreateThumbnail() =>
         ThumbnailUri is null ? null : new BitmapImage(ThumbnailUri) { DecodePixelWidth = 400 };
     public bool IsVideo { get; init; }
+    // A Live Photo still's motion file, played by the viewer's 实况 button.
+    public string? Companion { get; init; }
     // "实况" for a Live Photo still, "视频" for a video; empty hides the corner badge.
     public string Badge { get; init; } = "";
     public double BadgeOpacity => Badge.Length == 0 ? 0 : 1;
@@ -69,6 +71,7 @@ public sealed class PhotoCard : INotifyPropertyChanged
         return new PhotoCard
         {
             Path = path, FileName = filename, ThumbnailUri = thumbnailUri, IsVideo = video, Badge = badge,
+            Companion = string.IsNullOrEmpty(companion) ? null : companion,
             Subtitle = badge.Length == 0 ? subtitle : badge + " · " + subtitle
         };
     }

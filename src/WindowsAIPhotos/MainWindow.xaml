@@ -326,12 +326,61 @@
             <Button x:Name="SelectButton" Content="选择照片" Click="SelectButton_Click"/>
             <Button x:Name="SelectAllButton" Content="全选已加载" Click="SelectAllButton_Click" Visibility="Collapsed"/>
             <Button x:Name="RecycleButton" Content="移到回收站 (0)" Click="RecycleButton_Click" IsEnabled="False" Visibility="Collapsed"/>
-            <TextBlock Text="点击照片打开原图；按住鼠标拖动可框选（Ctrl 追加，Shift+点击连选）；向下滚动自动加载更多"
+            <TextBlock Text="点击照片预览（← → 切换，Esc 关闭）；按住鼠标拖动可框选（Ctrl 追加，Shift+点击连选）；向下滚动自动加载更多"
                        VerticalAlignment="Center" Margin="6,0,8,0" FontSize="11" Opacity="0.7"
                        TextTrimming="CharacterEllipsis"/>
           </StackPanel>
         </Border>
       </Grid>
+    </Grid>
+
+    <!-- In-app viewer over the whole window (see MainWindow.Viewer.cs). The thumbnail shows at once,
+         the full image replaces it when decoded. -->
+    <Grid x:Name="Viewer" Grid.ColumnSpan="2" Visibility="Collapsed" Background="#FF101012"
+          KeyboardAcceleratorPlacementMode="Hidden">
+      <Grid.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Escape" Invoked="ViewerKey_Invoked"/>
+        <KeyboardAccelerator Key="Left" Invoked="ViewerKey_Invoked"/>
+        <KeyboardAccelerator Key="Right" Invoked="ViewerKey_Invoked"/>
+      </Grid.KeyboardAccelerators>
+      <Image x:Name="ViewerThumb" Stretch="Uniform" Margin="72,88,72,40"/>
+      <Image x:Name="ViewerImage" Stretch="Uniform" Margin="72,88,72,40"/>
+      <MediaPlayerElement x:Name="ViewerVideo" Stretch="Uniform" Margin="72,88,72,40"
+                          AreTransportControlsEnabled="True" Visibility="Collapsed"/>
+      <!-- Below the title bar's drag area, which takes the clicks above it. -->
+      <Grid VerticalAlignment="Top" Margin="24,40,24,0" ColumnSpacing="8">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock x:Name="ViewerTitle" Foreground="White" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="ViewerSubtitle" Foreground="White" FontSize="12" Opacity="0.65"/>
+        </StackPanel>
+        <Button Grid.Column="1" x:Name="ViewerLiveButton" Click="ViewerLiveButton_Click" Visibility="Collapsed"
+                ToolTipService.ToolTip="播放实况照片的动态部分">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <FontIcon Glyph="&#xE768;" FontSize="12"/>
+            <TextBlock Text="实况"/>
+          </StackPanel>
+        </Button>
+        <Button Grid.Column="2" Content="用系统应用打开" Click="ViewerOpenExternal_Click"/>
+        <Button Grid.Column="3" x:Name="ViewerCloseButton" Click="ViewerCloseButton_Click" ToolTipService.ToolTip="关闭 (Esc)">
+          <FontIcon Glyph="&#xE711;" FontSize="14"/>
+        </Button>
+      </Grid>
+      <Button x:Name="ViewerPreviousButton" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="16,0,0,0"
+              Width="44" Height="44" CornerRadius="22" Padding="0" Click="ViewerPreviousButton_Click"
+              ToolTipService.ToolTip="上一张 (←)">
+        <FontIcon Glyph="&#xE76B;" FontSize="16"/>
+      </Button>
+      <Button x:Name="ViewerNextButton" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,16,0"
+              Width="44" Height="44" CornerRadius="22" Padding="0" Click="ViewerNextButton_Click"
+              ToolTipService.ToolTip="下一张 (→)">
+        <FontIcon Glyph="&#xE76C;" FontSize="16"/>
+      </Button>
     </Grid>
 
     <!-- Drag area of the merged title bar (the caption buttons sit above its right end). -->
