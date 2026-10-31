@@ -11,7 +11,8 @@ public sealed record IPhoneImportOutcome(string State, int Found = 0, int Alread
 
 /// <summary>
 /// Copies new camera-roll files from a USB-connected iPhone into the library. The phone
-/// is read through the Windows Shell (Explorer's path to "Internal Storage\DCIM"); nothing
+/// is read through the Windows Shell (Explorer's path to "Internal Storage\DCIM", or to
+/// Internal Storage itself where the camera-roll folders sit directly); nothing
 /// on it is changed. The engine decides which files are new and files the copies.
 /// </summary>
 /// <remarks>
@@ -102,7 +103,7 @@ public sealed class IPhoneImporter : IDisposable
                 status($"正在从 iPhone 复制 {done.Count + 1:N0}/{wanted.Count:N0}：{file.Name}");
                 // Subfolders keep IMG_0001 from 100APPLE and 101APPLE apart.
                 var relative = Path.Combine(file.Folder, file.Name);
-                try { CopyStream(file.ShellPath, Path.Combine(staging, relative)); }
+                try { CopyStream(file.IdList, Path.Combine(staging, relative)); }
                 catch (Exception ex) when (ex is IOException or COMException or UnauthorizedAccessException)
                 {
                     interruption = ex;  // E.g. unplugged: still keep everything copied so far.
@@ -119,11 +120,14 @@ public sealed class IPhoneImporter : IDisposable
             result.GetProperty("imported").GetInt32(), result.GetProperty("duplicates").GetInt32(), interruption?.Message);
     }
 
-    private sealed record DeviceFile(string ShellPath, string Folder, string Name, long Size, string Date);
+    // IdList: the item's absolute PIDL bytes. A phone item's ShellPath does not parse back into an
+    // item, and Shell objects cannot cross threads, but a PIDL is plain data that opens it anywhere.
+    private sealed record DeviceFile(string ShellPath, byte[] IdList, string Folder, string Name, long Size, string Date);
 
     private static dynamic Shell() => Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application")!)!;
 
-    /// <summary>This PC → the iPhone → Internal Storage → DCIM.</summary>
+    /// <summary>This PC → the iPhone → Internal Storage → DCIM. Some iPhones list the camera-roll
+    /// folders (202610_a, 100APPLE, ...) directly under Internal Storage; then that folder is the root.</summary>
     private static dynamic? OpenDcim(string displayName)
     {
         dynamic? device = null;
@@ -134,14 +138,19 @@ public sealed class IPhoneImporter : IDisposable
             if (device is null && name.Contains("iPhone", StringComparison.OrdinalIgnoreCase)) device = item;
         }
         if (device is null || !device.IsFolder) return null;
+        dynamic? storageWithFolders = null;
         foreach (dynamic storage in device.GetFolder.Items())
         {
             if (!storage.IsFolder) continue;
             foreach (dynamic child in storage.GetFolder.Items())
-                if (child.IsFolder && string.Equals((string)child.Name, "DCIM", StringComparison.OrdinalIgnoreCase))
-                    return child.GetFolder;
+            {
+                if (!child.IsFolder) continue;
+                if (string.Equals((string)child.Name, "DCIM", StringComparison.OrdinalIgnoreCase)) return child.GetFolder;
+                storageWithFolders ??= storage.GetFolder;
+            }
         }
-        return null;
+        // A locked or untrusted iPhone shows an empty Internal Storage, so this is still null then.
+        return storageWithFolders;
     }
 
     private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -166,13 +175,23 @@ public sealed class IPhoneImporter : IDisposable
                 string name = item.ExtendedProperty("System.FileName") as string ?? (string)item.Name;
                 if (!MediaExtensions.Contains(Path.GetExtension(name))) continue;
                 long size = Convert.ToInt64(item.ExtendedProperty("System.Size") ?? 0L);
-                DateTime modified = item.ModifyDate;
-                files.Add(new DeviceFile(item.Path, relative, name, size,
-                    new DateTimeOffset(modified).ToString("o")));
+                files.Add(new DeviceFile(item.Path, IdListOf(item), relative, name, size, ModifiedDate(item)));
             }
         }
         Walk(root, "", 0);
         return files;
+    }
+
+    /// <summary>Local ISO time the engine files the item under (destination/YYYY-MM).</summary>
+    /// <remarks>An iPhone item's ModifyDate is always 1899-12-30; System.DateModified holds the
+    /// real time, in UTC though its Kind is Unspecified.</remarks>
+    private static string ModifiedDate(dynamic item)
+    {
+        object? utc = item.ExtendedProperty("System.DateModified");
+        DateTimeOffset modified = utc is DateTime d
+            ? new DateTimeOffset(DateTime.SpecifyKind(d, DateTimeKind.Utc)).ToLocalTime()
+            : new DateTimeOffset((DateTime)item.ModifyDate);
+        return modified.ToString("o");
     }
 
     /// <summary>Shell automation objects need an STA thread; keep the UI thread free meanwhile.</summary>
@@ -189,13 +208,28 @@ public sealed class IPhoneImporter : IDisposable
         return done.Task;
     }
 
-    private static void CopyStream(string shellPath, string target)
+    private static byte[] IdListOf(object folderItem)
+    {
+        SHGetIDListFromObject(folderItem, out var pidl);
+        try
+        {
+            var bytes = new byte[ILGetSize(pidl)];
+            Marshal.Copy(pidl, bytes, 0, bytes.Length);
+            return bytes;
+        }
+        finally { Marshal.FreeCoTaskMem(pidl); }
+    }
+
+    private static void CopyStream(byte[] idList, string target)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         var bhidStream = new Guid("1CEBB3AB-7C10-499a-A417-92CA16C4CB83");
         var iidStream = new Guid("0000000c-0000-0000-C000-000000000046");
         var iidShellItem = typeof(IShellItem).GUID;
-        SHCreateItemFromParsingName(shellPath, IntPtr.Zero, ref iidShellItem, out var item);
+        IShellItem item;
+        var pinned = GCHandle.Alloc(idList, GCHandleType.Pinned);
+        try { SHCreateItemFromIDList(pinned.AddrOfPinnedObject(), ref iidShellItem, out item); }
+        finally { pinned.Free(); }
         item.BindToHandler(IntPtr.Zero, ref bhidStream, ref iidStream, out var handler);
         var stream = (IStream)handler;
         var partial = target + ".part";
@@ -228,8 +262,14 @@ public sealed class IPhoneImporter : IDisposable
         }
     }
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
-    private static extern void SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid riid,
+    [DllImport("shell32.dll", PreserveSig = false)]
+    private static extern void SHGetIDListFromObject([MarshalAs(UnmanagedType.IUnknown)] object item, out IntPtr pidl);
+
+    [DllImport("shell32.dll")]
+    private static extern uint ILGetSize(IntPtr pidl);
+
+    [DllImport("shell32.dll", PreserveSig = false)]
+    private static extern void SHCreateItemFromIDList(IntPtr pidl, ref Guid riid,
         [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
 
     [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

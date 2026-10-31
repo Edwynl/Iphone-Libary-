@@ -25,13 +25,17 @@ public sealed class PhotoCard : INotifyPropertyChanged
     public required string Path { get; init; }
     public required string FileName { get; init; }
     public string Subtitle { get; init; } = "";
-    public BitmapImage? Thumbnail { get; init; }
+    // Only a URI is kept. The item template calls CreateThumbnail when a card is shown, after its
+    // text (x:Phase 1), so cards that never scroll into view hold no bitmap.
+    public Uri? ThumbnailUri { get; init; }
+    public BitmapImage? CreateThumbnail() =>
+        ThumbnailUri is null ? null : new BitmapImage(ThumbnailUri) { DecodePixelWidth = 400 };
     public bool IsVideo { get; init; }
     // "实况" for a Live Photo still, "视频" for a video; empty hides the corner badge.
     public string Badge { get; init; } = "";
     public double BadgeOpacity => Badge.Length == 0 ? 0 : 1;
     // Play glyph for a video Windows has no codec to draw a frame for.
-    public double PlaceholderOpacity => IsVideo && Thumbnail is null ? 0.55 : 0;
+    public double PlaceholderOpacity => IsVideo && ThumbnailUri is null ? 0.55 : 0;
 
     public static PhotoCard Create(string path, string filename, string? thumbnail, long mtimeNanoseconds,
         string? takenAt = null, string? mediaKind = null, string? companion = null)
@@ -44,19 +48,10 @@ public sealed class PhotoCard : INotifyPropertyChanged
             sourcePath = thumbnail;
         else if (!video)
             sourcePath = path;
-        BitmapImage? bitmap = null;
-        try
-        {
-            if (sourcePath is not null && File.Exists(sourcePath))
-            {
-                bitmap = new BitmapImage(new Uri(sourcePath, UriKind.Absolute));
-                bitmap.DecodePixelWidth = 400;
-            }
-        }
-        catch (Exception)
-        {
-            // Undecodable files remain in the catalog but display no thumbnail.
-        }
+        Uri? thumbnailUri = null;
+        // Undecodable files remain in the catalog but display no thumbnail.
+        if (sourcePath is not null && File.Exists(sourcePath))
+            Uri.TryCreate(sourcePath, UriKind.Absolute, out thumbnailUri);
 
         string subtitle = "";
         try
@@ -73,7 +68,7 @@ public sealed class PhotoCard : INotifyPropertyChanged
         string badge = video ? "视频" : string.IsNullOrEmpty(companion) ? "" : "实况";
         return new PhotoCard
         {
-            Path = path, FileName = filename, Thumbnail = bitmap, IsVideo = video, Badge = badge,
+            Path = path, FileName = filename, ThumbnailUri = thumbnailUri, IsVideo = video, Badge = badge,
             Subtitle = badge.Length == 0 ? subtitle : badge + " · " + subtitle
         };
     }

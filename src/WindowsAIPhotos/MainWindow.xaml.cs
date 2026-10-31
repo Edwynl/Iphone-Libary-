@@ -47,11 +47,7 @@ public sealed partial class MainWindow : Window
         SetTitleBar(AppTitleBar);
         InitializeBoxSelection();
         PhotoGrid.ItemsSource = _photos;
-        PhotoGrid.Loaded += (_, _) =>
-        {
-            _gridScroll ??= FindChild<ScrollViewer>(PhotoGrid);
-            if (_gridScroll is not null) _gridScroll.ViewChanged += (_, _) => _ = LoadMoreIfNearEndAsync();
-        };
+        PhotoGrid.Loaded += (_, _) => _gridScroll ??= FindChild<ScrollViewer>(PhotoGrid);
         FolderList.ItemsSource = _folders;
         Closed += (_, _) => { _iphone?.Dispose(); _engine?.Dispose(); };
     }
@@ -147,8 +143,7 @@ public sealed partial class MainWindow : Window
         if (version != _browseVersion) return;
         _isSearch = false;
         DisplayPhotos(result.GetProperty("photos"), append: !reset);
-        // Keep filling until the grid can scroll; scrolling then loads the rest.
-        QueueLoadMoreCheck();
+        QueueNextPage();
         PageTitle.Text = MediaTitles[MediaIndex];
         StatusText.Text = _photos.Count == 0 ? "Add a local folder to start scanning."
             : $"已显示 {_photos.Count:N0} 项。点击打开原文件；实况照片的视频部分随照片一起管理。";
@@ -575,28 +570,26 @@ public sealed partial class MainWindow : Window
         try { await SearchAsync(); }
         catch (Exception ex) { ShowError("Search failed", ex); }
     }
-    private async Task LoadMoreIfNearEndAsync()
+    private async Task LoadNextPageAsync()
     {
-        if (_loadingMore || !_hasMore || _isSearch || _gridScroll is null) return;
-        // Load the next page while the user is still a screen away from the end.
-        if (_gridScroll.VerticalOffset < _gridScroll.ScrollableHeight - _gridScroll.ViewportHeight) return;
+        if (_loadingMore || !_hasMore || _isSearch) return;
         _loadingMore = true;
         try { _offset = _photos.Count; await BrowseAsync(reset: false); }
         catch (Exception ex) { ShowError("Cannot load more photos", ex); }
         finally { _loadingMore = false; }
     }
 
-    // Runs after layout, when the grid's scrollable height reflects the new items or size.
-    private void QueueLoadMoreCheck() =>
+    // Preload the whole library page by page at low priority (cards hold only a file path),
+    // so scrolling never stops to fetch and lay out a page. Each page queues the next.
+    private void QueueNextPage() =>
         DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-            () => _ = LoadMoreIfNearEndAsync());
+            () => _ = LoadNextPageAsync());
 
     private void ThumbSize_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
         if (PhotoGrid?.ItemsPanelRoot is not ItemsWrapGrid panel) return;
         panel.ItemWidth = e.NewValue;
         panel.ItemHeight = Math.Round(e.NewValue * 0.77) + 53;  // Image area plus two caption lines.
-        QueueLoadMoreCheck();
     }
 
     private static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
