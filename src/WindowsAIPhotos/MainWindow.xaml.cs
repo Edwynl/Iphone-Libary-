@@ -33,11 +33,16 @@ public sealed partial class MainWindow : Window
     private bool _loadingImportSettings;
     private bool _importing;
     private bool _selecting;
-    private string MediaType => MediaFilter.SelectedIndex == 1 ? "photo" : MediaFilter.SelectedIndex == 2 ? "video" : "all";
+    // In MediaFilter order.
+    private static readonly string[] MediaTypes = { "all", "photo", "video", "screenshot" };
+    private static readonly string[] MediaTitles = { "All media / 全部", "Photos / 照片", "Videos / 视频", "Screenshots / 截图" };
+    private int MediaIndex => Math.Max(0, MediaFilter.SelectedIndex);
+    private string MediaType => MediaTypes[MediaIndex];
 
     public MainWindow()
     {
         InitializeComponent();
+        InitializeBoxSelection();
         PhotoGrid.ItemsSource = _photos;
         PhotoGrid.Loaded += (_, _) =>
         {
@@ -85,7 +90,8 @@ public sealed partial class MainWindow : Window
         bool installed = data.GetProperty("ai_installed").GetBoolean();
         int videos = data.TryGetProperty("videos", out var v) ? v.GetInt32() : 0;
         int live = data.TryGetProperty("live_photos", out var l) ? l.GetInt32() : 0;
-        PhotoCount.Text = $"{count:N0} 张照片（{live:N0} 实况） · {videos:N0} 个视频";
+        int screenshots = data.TryGetProperty("screenshots", out var s) ? s.GetInt32() : 0;
+        PhotoCount.Text = $"{count:N0} 张照片（{live:N0} 实况，{screenshots:N0} 截图） · {videos:N0} 个视频";
         AiState.Text = installed ? $"Ready · {embedded:N0}/{count + videos:N0} AI-indexed"
                                  : "Not installed · filename search only";
         if (data.TryGetProperty("ai_error", out var aiError) && !string.IsNullOrEmpty(aiError.GetString()))
@@ -108,7 +114,11 @@ public sealed partial class MainWindow : Window
 
     private void DisplayPhotos(JsonElement json, bool append)
     {
-        if (!append) _photos.Clear();
+        if (!append)
+        {
+            _photos.Clear();
+            _anchorIndex = null;
+        }
         foreach (var row in json.EnumerateArray())
         {
             var path = Str(row, "path");
@@ -136,7 +146,7 @@ public sealed partial class MainWindow : Window
         DisplayPhotos(result.GetProperty("photos"), append: !reset);
         // Keep filling until the grid can scroll; scrolling then loads the rest.
         QueueLoadMoreCheck();
-        PageTitle.Text = MediaType == "video" ? "Videos / 视频" : MediaType == "photo" ? "Photos / 照片" : "All media / 全部";
+        PageTitle.Text = MediaTitles[MediaIndex];
         StatusText.Text = _photos.Count == 0 ? "Add a local folder to start scanning."
             : $"已显示 {_photos.Count:N0} 项。点击打开原文件；实况照片的视频部分随照片一起管理。";
     }
@@ -596,12 +606,15 @@ public sealed partial class MainWindow : Window
         }
         return null;
     }
-    private void SelectButton_Click(object sender, RoutedEventArgs e)
+    private void SelectButton_Click(object sender, RoutedEventArgs e) => SetSelecting(!_selecting);
+
+    private void SetSelecting(bool selecting)
     {
-        if (_selecting)
+        if (!selecting)
         {
             PhotoGrid.SelectedItems.Clear();
             _selecting = false;
+            _anchorIndex = null;
             PhotoGrid.SelectionMode = ListViewSelectionMode.None;
             PhotoGrid.IsItemClickEnabled = true;
         }

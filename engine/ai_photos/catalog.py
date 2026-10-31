@@ -23,8 +23,11 @@ from .media import VIDEO_EXTENSIONS, probe_video, video_thumbnail
 LIVE_STILL_EXTENSIONS = frozenset({".heic", ".heif", ".jpg", ".jpeg"})
 # Live Photo motion files are kept (backups, recycle pairing) but shown through their still.
 _VISIBLE = "media_kind!='live_motion'"
+_MEDIA_FILTERS = {"all": _VISIBLE, "photo": "media_kind='photo'", "video": "media_kind='video'",
+                  "screenshot": "media_kind='photo' AND screenshot=1"}
 _COLUMNS = "id,path,name,thumb_path,mtime_ns,taken_at,width,height,error,media_kind,companion"
 _FILENAME_QUERY = re.compile(r"[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*")
+_SCREENSHOT_NAME = re.compile(r"screen[ _-]?shot|截图|截屏", re.IGNORECASE)
 
 LOG = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 150_000_000
@@ -44,6 +47,23 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=15000")
     return conn
+
+
+def _is_screenshot(path: Path) -> bool | None:
+    """iPhone screenshots are PNGs whose EXIF UserComment says "Screenshot";
+    Windows, macOS and Android name them so. None: unreadable now, retry later."""
+    if _SCREENSHOT_NAME.search(path.name):
+        return True
+    if path.suffix.lower() != ".png":
+        return False
+    try:
+        with Image.open(path) as image:
+            comment = image.getexif().get_ifd(0x8769).get(0x9286)
+    except (OSError, ValueError):
+        return None
+    if isinstance(comment, bytes):
+        comment = comment.decode("utf-8", "ignore")
+    return "screenshot" in str(comment or "").casefold()
 
 
 class PhotoCatalog:
@@ -101,7 +121,8 @@ class PhotoCatalog:
             """)
             columns = {r["name"] for r in db.execute("PRAGMA table_info(photos)")}
             for name, declaration in (("media_kind", "TEXT NOT NULL DEFAULT 'photo'"),
-                                      ("live_meta", "INTEGER"), ("companion", "TEXT")):
+                                      ("live_meta", "INTEGER"), ("companion", "TEXT"),
+                                      ("screenshot", "INTEGER")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE photos ADD COLUMN {name} {declaration}")
             if "media_kind" not in columns:
@@ -219,7 +240,7 @@ class PhotoCatalog:
                 return previous["id"], False, False
             error = None if thumbnail else taken_or_error
             taken = taken_or_error if thumbnail else None
-            # A changed video is probed again for Live Photo metadata after the walk.
+            # A changed file is probed again (Live Photo metadata, screenshot) after the walk.
             db.execute("""
                 INSERT INTO photos(path,folder,name,size,mtime_ns,taken_at,width,height,thumb_path,error,indexed_at,media_kind,live_meta)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)
@@ -227,7 +248,7 @@ class PhotoCatalog:
                   size=excluded.size,mtime_ns=excluded.mtime_ns,taken_at=excluded.taken_at,
                   width=excluded.width,height=excluded.height,thumb_path=excluded.thumb_path,
                   error=excluded.error,indexed_at=excluded.indexed_at,
-                  media_kind=excluded.media_kind,live_meta=NULL
+                  media_kind=excluded.media_kind,live_meta=NULL,screenshot=NULL
             """, (p, root, previous['name'] if previous else path.name, stat.st_size, stat.st_mtime_ns, taken, width, height,
                   thumbnail, error, datetime.now(timezone.utc).isoformat(),
                   'video' if path.suffix.lower() in VIDEO_EXTENSIONS else 'photo'))
@@ -352,6 +373,7 @@ class PhotoCatalog:
                               "message": "Incomplete scan; existing photo records retained"})
                 db.commit()
             self._link_live_photos(db)
+            self._mark_screenshots(db)
         result = {"seen": seen, "updated": updated, "embedded": embedded,
                   "removed": removed, "errors": errors, "elapsed_sec": round(time.monotonic() - t0, 2)}
         if progress:
@@ -394,10 +416,18 @@ class PhotoCatalog:
         db.executemany("UPDATE photos SET thumb_path=? WHERE id=?", posters)
         db.commit()
 
+    def _mark_screenshots(self, db: sqlite3.Connection) -> None:
+        pending = db.execute("SELECT id,path FROM photos WHERE media_kind='photo' AND screenshot IS NULL").fetchall()
+        db.commit()  # Reading files; hold no writer meanwhile.
+        marks = [(int(found), row["id"]) for row in pending
+                 if (found := _is_screenshot(Path(row["path"]))) is not None]
+        db.executemany("UPDATE photos SET screenshot=? WHERE id=?", marks)
+        db.commit()
+
     def browse(self, limit: int = 120, offset: int = 0, media_type: str = "all") -> list[dict]:
-        if media_type not in {"all", "photo", "video"}:
+        if media_type not in _MEDIA_FILTERS:
             raise ValueError("Invalid media type")
-        where = _VISIBLE if media_type == "all" else f"media_kind='{media_type}'"
+        where = _MEDIA_FILTERS[media_type]
         with self.connection() as db:
             rows = db.execute(f"""
                 SELECT {_COLUMNS} FROM photos
@@ -457,11 +487,12 @@ class PhotoCatalog:
 
     def stats(self, model_id: str | None = None) -> dict:
         with self.connection() as db:
-            count, videos, live = db.execute("""SELECT COALESCE(SUM(media_kind='photo'),0), COALESCE(SUM(media_kind='video'),0),
-                COALESCE(SUM(media_kind='photo' AND companion IS NOT NULL),0) FROM photos""").fetchone()
+            count, videos, live, screenshots = db.execute("""SELECT COALESCE(SUM(media_kind='photo'),0), COALESCE(SUM(media_kind='video'),0),
+                COALESCE(SUM(media_kind='photo' AND companion IS NOT NULL),0),
+                COALESCE(SUM(media_kind='photo' AND screenshot=1),0) FROM photos""").fetchone()
             failures = db.execute("SELECT COUNT(*) FROM photos WHERE error IS NOT NULL").fetchone()[0]
             vectors = db.execute("SELECT COUNT(*) FROM embeddings WHERE model_id=?", (model_id,)).fetchone()[0] if model_id else 0
-            return {"photos": count, "videos": videos, "live_photos": live, "folders": len(self.folders()), "errors": failures,
+            return {"photos": count, "videos": videos, "live_photos": live, "screenshots": screenshots, "folders": len(self.folders()), "errors": failures,
                     "embeddings": vectors, "db_bytes": self.db_path.stat().st_size}
 
     def search(self, query: str, limit: int = 120, encoder=None) -> dict:
