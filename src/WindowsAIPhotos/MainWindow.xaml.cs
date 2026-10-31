@@ -4,7 +4,9 @@ using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.Storage.Pickers;
 using Windows.System;
 using WindowsAIPhotos.Models;
@@ -22,6 +24,10 @@ public sealed partial class MainWindow : Window
     private bool _working;
     private bool _isSearch;
     private int _offset;
+    private bool _hasMore;
+    private bool _loadingMore;
+    private int _browseVersion;
+    private ScrollViewer? _gridScroll;
     private bool _selecting;
     private string MediaType => MediaFilter.SelectedIndex == 1 ? "photo" : MediaFilter.SelectedIndex == 2 ? "video" : "all";
 
@@ -29,6 +35,11 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         PhotoGrid.ItemsSource = _photos;
+        PhotoGrid.Loaded += (_, _) =>
+        {
+            _gridScroll ??= FindChild<ScrollViewer>(PhotoGrid);
+            if (_gridScroll is not null) _gridScroll.ViewChanged += (_, _) => _ = LoadMoreIfNearEndAsync();
+        };
         FolderList.ItemsSource = _folders;
         Closed += (_, _) => _engine?.Dispose();
     }
@@ -101,16 +112,20 @@ public sealed partial class MainWindow : Window
         EmptyState.Visibility = _photos.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Text = _folders.Count == 0 ? "Choose Add photo folder to begin."
             : _isSearch ? "No matching photos found." : "No photos indexed yet. Choose Scan.";
-        LoadMoreButton.Visibility = !_isSearch && json.GetArrayLength() == PageSize
-            ? Visibility.Visible : Visibility.Collapsed;
+        _hasMore = !_isSearch && json.GetArrayLength() == PageSize;
     }
 
     private async Task BrowseAsync(bool reset)
     {
-        _isSearch = false;
         if (reset) _offset = 0;
+        // A newer browse or search supersedes this page; never append it to their results.
+        int version = reset ? ++_browseVersion : _browseVersion;
         var result = await CallAsync("browse", new { limit = PageSize, offset = _offset, media_type = MediaType });
+        if (version != _browseVersion) return;
+        _isSearch = false;
         DisplayPhotos(result.GetProperty("photos"), append: !reset);
+        // Keep filling until the grid can scroll; scrolling then loads the rest.
+        QueueLoadMoreCheck();
         PageTitle.Text = MediaType == "video" ? "Videos / 视频" : MediaType == "photo" ? "Photos / 照片" : "All media / 全部";
         StatusText.Text = _photos.Count == 0 ? "Add a local folder to start scanning."
             : $"已显示 {_photos.Count:N0} 项。点击打开原文件；实况照片的视频部分随照片一起管理。";
@@ -120,6 +135,7 @@ public sealed partial class MainWindow : Window
     {
         string query = SearchBox.Text.Trim();
         if (query.Length == 0) { await BrowseAsync(true); return; }
+        _browseVersion++;
         _isSearch = true;
         StatusText.Text = "Searching local photo library...";
         var result = await CallAsync("search", new { query, limit = 200 });
@@ -413,10 +429,39 @@ public sealed partial class MainWindow : Window
         try { await SearchAsync(); }
         catch (Exception ex) { ShowError("Search failed", ex); }
     }
-    private async void LoadMoreButton_Click(object sender, RoutedEventArgs e)
+    private async Task LoadMoreIfNearEndAsync()
     {
+        if (_loadingMore || !_hasMore || _isSearch || _gridScroll is null) return;
+        // Load the next page while the user is still a screen away from the end.
+        if (_gridScroll.VerticalOffset < _gridScroll.ScrollableHeight - _gridScroll.ViewportHeight) return;
+        _loadingMore = true;
         try { _offset = _photos.Count; await BrowseAsync(reset: false); }
         catch (Exception ex) { ShowError("Cannot load more photos", ex); }
+        finally { _loadingMore = false; }
+    }
+
+    // Runs after layout, when the grid's scrollable height reflects the new items or size.
+    private void QueueLoadMoreCheck() =>
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => _ = LoadMoreIfNearEndAsync());
+
+    private void ThumbSize_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        if (PhotoGrid?.ItemsPanelRoot is not ItemsWrapGrid panel) return;
+        panel.ItemWidth = e.NewValue;
+        panel.ItemHeight = Math.Round(e.NewValue * 0.77) + 53;  // Image area plus two caption lines.
+        QueueLoadMoreCheck();
+    }
+
+    private static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match) return match;
+            if (FindChild<T>(child) is { } nested) return nested;
+        }
+        return null;
     }
     private void SelectButton_Click(object sender, RoutedEventArgs e)
     {

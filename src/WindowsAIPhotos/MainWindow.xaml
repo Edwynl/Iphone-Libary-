@@ -135,10 +135,18 @@
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
           <TextBlock x:Name="StatusText" Text="Starting local engine..." TextWrapping="Wrap"
                      Opacity="0.75" FontSize="12"/>
-          <TextBlock x:Name="PhotoCount" Grid.Column="1" Text="0 photos" FontSize="12" Opacity="0.7"/>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="0,0,12,0">
+            <TextBlock Text="缩略图" FontSize="12" Opacity="0.7" VerticalAlignment="Center"/>
+            <Slider x:Name="ThumbSize" Width="140" Minimum="110" Maximum="360" StepFrequency="5"
+                    Value="185" VerticalAlignment="Center" ValueChanged="ThumbSize_ValueChanged"
+                    ToolTipService.ToolTip="调整缩略图大小"/>
+          </StackPanel>
+          <TextBlock x:Name="PhotoCount" Grid.Column="2" Text="0 photos" FontSize="12" Opacity="0.7"
+                     VerticalAlignment="Center"/>
         </Grid>
         <ProgressBar x:Name="WorkProgress" IsIndeterminate="True" Visibility="Collapsed" Height="3"/>
       </StackPanel>
@@ -148,24 +156,39 @@
                   SelectionMode="None" SelectionChanged="PhotoGrid_SelectionChanged" Padding="0" Margin="-10,0,-8,0"
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <!-- Item size follows the ThumbSize slider (set in code). -->
+          <GridView.ItemsPanel>
+            <ItemsPanelTemplate>
+              <ItemsWrapGrid Orientation="Horizontal" ItemWidth="185" ItemHeight="195"/>
+            </ItemsPanelTemplate>
+          </GridView.ItemsPanel>
+          <GridView.ItemContainerStyle>
+            <Style TargetType="GridViewItem">
+              <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+              <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+            </Style>
+          </GridView.ItemContainerStyle>
           <GridView.ItemTemplate>
             <DataTemplate>
-              <StackPanel Width="185" Spacing="6" Padding="5">
-                <Grid Width="175" Height="142">
-                  <Border CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                    <Image Source="{Binding Thumbnail}" Width="175" Height="142"
-                           Stretch="UniformToFill"/>
-                  </Border>
-                  <FontIcon Glyph="&#xE768;" FontSize="36" Opacity="{Binding PlaceholderOpacity}"
-                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                  <Border Opacity="{Binding BadgeOpacity}" Background="#B0000000" CornerRadius="4"
-                          Padding="6,2" Margin="6" HorizontalAlignment="Left" VerticalAlignment="Top">
-                    <TextBlock Text="{Binding Badge}" FontSize="11" Foreground="White"/>
-                  </Border>
-                </Grid>
-                <TextBlock Text="{Binding FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
-                <TextBlock Text="{Binding Subtitle}" FontSize="11" Opacity="0.6"/>
-              </StackPanel>
+              <Grid RowSpacing="6" Padding="5">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="*"/>
+                  <RowDefinition Height="Auto"/>
+                  <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <Border CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+                  <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
+                </Border>
+                <FontIcon Glyph="&#xE768;" FontSize="36" Opacity="{Binding PlaceholderOpacity}"
+                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <Border Opacity="{Binding BadgeOpacity}" Background="#B0000000" CornerRadius="4"
+                        Padding="6,2" Margin="6" HorizontalAlignment="Left" VerticalAlignment="Top">
+                  <TextBlock Text="{Binding Badge}" FontSize="11" Foreground="White"/>
+                </Border>
+                <TextBlock Grid.Row="1" Text="{Binding FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Grid.Row="2" Text="{Binding Subtitle}" FontSize="11" Opacity="0.6" MaxLines="1"
+                           TextTrimming="CharacterEllipsis"/>
+              </Grid>
             </DataTemplate>
           </GridView.ItemTemplate>
         </GridView>
@@ -179,16 +202,13 @@
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
-        <TextBlock Grid.Column="4" Text="点击照片打开原图；选择模式可多选当前已加载的照片"
+        <TextBlock Grid.Column="3" Text="点击照片打开原图；向下滚动自动加载更多；选择模式可多选已加载的照片"
                    VerticalAlignment="Center" FontSize="11" Opacity="0.6"/>
         <Button x:Name="SelectButton" Grid.Column="0" Content="选择照片" Click="SelectButton_Click"/>
         <Button x:Name="SelectAllButton" Grid.Column="1" Content="全选已加载" Click="SelectAllButton_Click" Visibility="Collapsed"/>
         <Button x:Name="RecycleButton" Grid.Column="2" Content="移到回收站 (0)" Click="RecycleButton_Click" IsEnabled="False" Visibility="Collapsed"/>
-        <Button x:Name="LoadMoreButton" Grid.Column="3" Content="Load more" Click="LoadMoreButton_Click"
-                Visibility="Collapsed"/>
       </Grid>
     </Grid>
   </Grid>
