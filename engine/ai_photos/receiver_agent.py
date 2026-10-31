@@ -224,8 +224,12 @@ class ReceiverController:
                 # silently die with the window.
                 if getattr(exc, 'winerror', None) != 5:
                     raise
-                raise RuntimeError('This app was launched inside a Windows job that does not allow the '
-                                   'receiver to outlive it; start Windows AI Photos normally and retry') from exc
+                if os.environ.get('AI_PHOTOS_RECEIVER_JOB_BOUND') != '1':
+                    raise RuntimeError('This app was launched inside a Windows job that does not allow the '
+                                       'receiver to outlive it; start Windows AI Photos normally and retry') from exc
+                # Explicit opt-in (CI, debugging hosts): the receiver may stop
+                # with this host, and its status says so instead of implying it persists.
+                child = subprocess.Popen(arguments + ['--job-bound'], creationflags=flags, **common)
         else:
             child = subprocess.Popen(arguments, start_new_session=True, **common)
         self._child = child
@@ -314,7 +318,7 @@ def _manage(manager, action, params):
     raise ValueError('Unknown receiver action')
 
 
-def run_receiver(home, inbox, port, instance):
+def run_receiver(home, inbox, port, instance, job_bound=False):
     if port in {8765, 8766}:
         raise ValueError('Protected preview/service ports cannot host the receiver')
     home = Path(home).resolve()
@@ -352,7 +356,8 @@ def run_receiver(home, inbox, port, instance):
                             raise ValueError('Receiver control authentication required')
                         action = message.get('action')
                         status = {'running': True, 'pid': os.getpid(), 'port': server.port,
-                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent'}
+                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent',
+                                  'job_bound': job_bound}
                         if action == 'status':
                             data = status
                         elif action == 'pairing':
@@ -392,9 +397,10 @@ def main():
     parser.add_argument('--inbox', type=Path, required=True)
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--instance', required=True)
+    parser.add_argument('--job-bound', action='store_true')
     args = parser.parse_args()
     try:
-        run_receiver(args.home, args.inbox, args.port, args.instance)
+        run_receiver(args.home, args.inbox, args.port, args.instance, args.job_bound)
     except ReceiverBusy:
         return 2
     except Exception as exc:

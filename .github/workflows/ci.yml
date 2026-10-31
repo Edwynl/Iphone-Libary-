@@ -20,6 +20,10 @@ jobs:
 
   windows-build:
     runs-on: windows-latest
+    env:
+      # Actions runs every step inside a job that forbids breakaway; accept a
+      # receiver that ends with the runner instead of failing closed.
+      AI_PHOTOS_RECEIVER_JOB_BOUND: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
