@@ -186,7 +186,7 @@ class PhotoCatalog:
         changed = previous is None or previous["size"] != stat.st_size or previous["mtime_ns"] != stat.st_mtime_ns
         if changed or previous['error']:
             # An unchanged undecodable file is retried (a decoder may have been
-            # installed) but only rewritten and reported once it decodes.
+            # installed) but only rewritten and reported as updated once it decodes.
             thumbnail, width, height, taken_or_error = prepared[1] if prepared else self._thumb(path, stat.st_mtime_ns)
             if not changed and not thumbnail:
                 return previous["id"], False, False
@@ -283,8 +283,8 @@ class PhotoCatalog:
                         continue
                     if was_updated:
                         updated += 1
-                        if not decodable:
-                            errors += 1
+                    if not decodable:
+                        errors += 1  # Every currently undecodable file, changed or not.
                     if encoder is not None and decodable:
                         has_embedding = db.execute(
                             "SELECT 1 FROM embeddings WHERE photo_id=? AND model_id=?",

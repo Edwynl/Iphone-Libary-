@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import sys
@@ -133,23 +134,47 @@ def test_complete_refuses_before_copy_when_import_volume_is_full(tmp_path, monke
     assert manager.complete(device, tid)['status'] == 'complete'
 
 
-def s3_fake(objects, *, fail=()):
-    def upload(path, bucket, key, ExtraArgs):
-        if Path(path).name in fail:
-            raise OSError('network')
-        objects[key] = ExtraArgs['Metadata']
-
-    def head(Bucket, Key):
-        if Key not in objects:
-            raise KeyError(Key)
-        return {'Metadata': objects[Key]}
-
-    puts = []
-    return SimpleNamespace(upload_file=upload, head_object=head,
-                           put_object=lambda **k: puts.append(k)), puts
+class S3Error(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.response = {'Error': {'Code': code}}
 
 
-def test_s3_failed_run_never_replaces_manifest_and_objects_are_immutable(tmp_path, monkeypatch):
+class FakeS3:
+    """Stores object bodies so overwrites and corruption are observable."""
+
+    def __init__(self):
+        self.bodies, self.metadata, self.puts = {}, {}, []
+        self.head_error = None
+        self.during_upload = None
+
+    def upload_file(self, path, bucket, key, ExtraArgs, Config=None):
+        if self.during_upload:
+            self.during_upload(Path(path))
+        self.bodies[key] = Path(path).read_bytes()
+        self.metadata[key] = ExtraArgs['Metadata']
+
+    def head_object(self, Bucket, Key, ChecksumMode=None):
+        if self.head_error:
+            raise S3Error(self.head_error)
+        if Key not in self.bodies:
+            raise S3Error('404')
+        body = self.bodies[Key]
+        return {'ContentLength': len(body), 'Metadata': self.metadata[Key],
+                'ChecksumSHA256': base64.b64encode(hashlib.sha256(body).digest()).decode()}
+
+    def get_object(self, Bucket, Key):
+        if Key not in self.bodies:
+            raise S3Error('NoSuchKey')
+        return {'Body': io.BytesIO(self.bodies[Key])}
+
+    def put_object(self, Bucket, Key, Body, **kwargs):
+        self.puts.append(Key)
+        self.bodies[Key] = Body
+
+
+@pytest.fixture
+def photo_library(tmp_path):
     source = tmp_path / 'photos'
     source.mkdir()
     for name, color in [('A.png', 'blue'), ('B.png', 'green')]:
@@ -157,35 +182,70 @@ def test_s3_failed_run_never_replaces_manifest_and_objects_are_immutable(tmp_pat
     cat = PhotoCatalog(tmp_path / 'state')
     cat.add_folder(str(source))
     cat.scan()
-    objects = {}
-    fake, puts = s3_fake(objects)
+    return cat, source
+
+
+def run_s3(cat, fake, monkeypatch):
     monkeypatch.setitem(sys.modules, 'boto3', SimpleNamespace(client=lambda *a, **k: fake))
-    first = backup_s3(cat, bucket='b', apply=True)
-    assert first['complete'] and first['uploaded'] == 2 and first['snapshot_id']
-    assert all('/objects/' in key for key in objects)
-    assert {p['Key'].rsplit('/', 1)[-1] for p in puts} == {'backup-manifest.json', first['snapshot_id'] + '.json'}
-    manifest = json.loads(puts[-1]['Body'])
+    return backup_s3(cat, bucket='b', apply=True)
+
+
+def object_snapshot(fake):
+    return {k: v for k, v in fake.bodies.items() if '/objects/' in k}
+
+
+def test_s3_publishes_complete_snapshots_and_reuses_verified_objects(photo_library, monkeypatch):
+    cat, _ = photo_library
+    fake = FakeS3()
+    first = run_s3(cat, fake, monkeypatch)
+    assert first['complete'] and first['uploaded'] == 2 and first['latest_published']
+    assert fake.puts == [f"windows-ai-photos/snapshots/{first['snapshot_id']}.json",
+                         'windows-ai-photos/backup-manifest.json']
+    manifest = json.loads(fake.bodies['windows-ai-photos/backup-manifest.json'])
     assert manifest['complete'] and manifest['version'] == 2 and len(manifest['files']) == 2
+    again = run_s3(cat, fake, monkeypatch)
+    assert again['complete'] and again['uploaded'] == 0 and again['unchanged'] == 2
 
-    again = backup_s3(cat, bucket='b', apply=True)
-    assert again['uploaded'] == 0 and again['unchanged'] == 2
 
+def test_s3_denied_head_never_overwrites_or_publishes(photo_library, monkeypatch):
+    cat, _ = photo_library
+    fake = FakeS3()
+    run_s3(cat, fake, monkeypatch)
+    before, puts = object_snapshot(fake), list(fake.puts)
+    fake.head_error = 'AccessDenied'
+    result = run_s3(cat, fake, monkeypatch)
+    assert not result['complete'] and result['uploaded'] == 0
+    assert object_snapshot(fake) == before and fake.puts == puts
+
+
+def test_s3_source_change_during_upload_keeps_previous_snapshot_intact(photo_library, monkeypatch):
+    cat, source = photo_library
+    fake = FakeS3()
+    run_s3(cat, fake, monkeypatch)
+    before, pointer = object_snapshot(fake), fake.bodies['windows-ai-photos/backup-manifest.json']
     Image.new('RGB', (12, 12), 'red').save(source / 'A.png')
     cat.scan()
-    failing, failed_puts = s3_fake(objects, fail={'A.png'})
-    monkeypatch.setitem(sys.modules, 'boto3', SimpleNamespace(client=lambda *a, **k: failing))
-    result = backup_s3(cat, bucket='b', apply=True)
-    assert not result['complete'] and result['issues'] and failed_puts == []
+    fake.during_upload = lambda path: path.write_bytes(path.read_bytes() + b'tail')
+    result = run_s3(cat, fake, monkeypatch)
+    assert not result['complete'] and not result['latest_published']
+    assert all(fake.bodies[k] == v for k, v in before.items())
+    assert fake.bodies['windows-ai-photos/backup-manifest.json'] == pointer
 
 
-def test_backup_reuses_verified_legacy_layout_instead_of_copying(tmp_path):
-    source = tmp_path / 'photos'
-    source.mkdir()
-    for name, color in [('A.png', 'blue'), ('B.png', 'green')]:
-        Image.new('RGB', (12, 12), color).save(source / name)
-    cat = PhotoCatalog(tmp_path / 'state')
-    cat.add_folder(str(source))
-    cat.scan()
+def test_s3_corrupt_stored_object_is_uploaded_again_under_a_new_key(photo_library, monkeypatch):
+    cat, _ = photo_library
+    fake = FakeS3()
+    run_s3(cat, fake, monkeypatch)
+    corrupt = next(iter(object_snapshot(fake)))
+    fake.bodies[corrupt] = b'bit-rot'
+    result = run_s3(cat, fake, monkeypatch)
+    assert result['complete'] and result['uploaded'] == 1 and result['unchanged'] == 1
+    manifest = json.loads(fake.bodies['windows-ai-photos/backup-manifest.json'])
+    assert corrupt not in {r['backup_path'] for r in manifest['files']}
+
+
+def test_migrated_backup_survives_old_client_rewriting_legacy_files(photo_library, tmp_path):
+    cat, source = photo_library
     target = tmp_path / 'backup'
     records = []
     for path in sorted(source.glob('*.png')):
@@ -196,19 +256,16 @@ def test_backup_reuses_verified_legacy_layout_instead_of_copying(tmp_path):
                         'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size': path.stat().st_size})
     (target / 'backup-manifest.json').write_text(json.dumps(
         {'version': 1, 'complete': True, 'files': records, 'issues': []}))
-    # A corrupt legacy file is never trusted.
-    (target / ('a' * 16) / 'B.png').write_bytes(b'corrupt')
-
-    result = backup_local(cat, target, apply=True)
-    assert result['complete'] and result['copied'] == 1 and result['unchanged'] == 1
-    assert len(list((target / 'objects').rglob('*.png'))) == 1
+    assert backup_local(cat, target, apply=True)['complete']
+    for legacy in (target / ('a' * 16)).glob('*.png'):
+        legacy.write_bytes(b'rewritten in place by another writer')
     restored = tmp_path / 'restored'
     assert restore_local(target, restored, apply=True)['complete']
     assert {p.name: p.read_bytes() for p in restored.rglob('*.png')} == {
         p.name: p.read_bytes() for p in source.glob('*.png')}
 
 
-def test_unchanged_undecodable_file_is_not_reported_as_updated_again(tmp_path):
+def test_undecodable_files_are_counted_as_errors_but_not_updates(tmp_path):
     source = tmp_path / 'photos'
     source.mkdir()
     (source / 'raw.HEIC').write_bytes(b'fixture')
@@ -217,5 +274,54 @@ def test_unchanged_undecodable_file_is_not_reported_as_updated_again(tmp_path):
     with patch.object(cat, '_thumb', return_value=('', 0, 0, 'missing decoder')):
         first = cat.scan()
         second = cat.scan()
-    assert first['updated'] == 1 and first['errors'] == 1
-    assert second['updated'] == 0 and second['errors'] == 0
+    with patch.object(cat, '_thumb', return_value=('decoded.jpg', 8, 8, None)):
+        third = cat.scan()
+    assert (first['updated'], first['errors']) == (1, 1)
+    assert (second['updated'], second['errors']) == (0, 1)
+    assert (third['updated'], third['errors']) == (1, 0)
+
+
+@pytest.mark.parametrize('interrupt', ['revoke', 'pause'])
+def test_revoke_or_pause_during_unlocked_copy_is_not_committed(tmp_path, interrupt):
+    _, manager, device = manager_at(tmp_path)
+    tid = staged(manager, device)
+    original = SafeDirectory.copy
+
+    def copy_then_interrupt(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        manager.revoke_device(device) if interrupt == 'revoke' else manager.set_paused(True)
+        return result
+
+    with patch.object(SafeDirectory, 'copy', copy_then_interrupt):
+        with pytest.raises(SyncFailure) as error:
+            manager.complete(device, tid)
+    assert error.value.status == (401 if interrupt == 'revoke' else 423)
+    assert (manager.staging / (tid + '.part')).is_file()
+    with manager.catalog.connection() as db:
+        assert db.execute('SELECT status FROM sync_transfers WHERE id=?', (tid,)).fetchone()[0] == 'pending'
+    if interrupt == 'pause':
+        manager.set_paused(False)
+        assert manager.complete(device, tid)['status'] == 'complete'
+
+
+def test_stop_waits_for_a_pending_starter_instead_of_reporting_stopped(tmp_path, monkeypatch):
+    from ai_photos import receiver_agent
+    controller = ReceiverController(tmp_path / 'state')
+    monkeypatch.setattr(receiver_agent, 'CONTROL_WAIT_SECONDS', 0.3)
+    holding, release = threading.Event(), threading.Event()
+
+    def starter():  # Simulates start() between spawn and child readiness.
+        with receiver_agent.control_lease(controller.home):
+            holding.set()
+            release.wait(10)
+
+    thread = threading.Thread(target=starter)
+    thread.start()
+    try:
+        assert holding.wait(10)
+        with pytest.raises(receiver_agent.ReceiverBusy):
+            controller.stop()
+    finally:
+        release.set()
+        thread.join(10)
+    assert controller.stop()['stopped']

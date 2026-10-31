@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from multiprocessing import connection
 from pathlib import Path
 
@@ -46,6 +46,27 @@ if os.name == 'nt':
     _kernel.LocalFree.argtypes = [ctypes.c_void_p]
     _kernel.LocalFree.restype = ctypes.c_void_p
 
+    class _BasicLimits(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
+        _fields_ = [('per_process_time', ctypes.c_int64), ('per_job_time', ctypes.c_int64),
+                    ('flags', wintypes.DWORD), ('min_working_set', ctypes.c_size_t),
+                    ('max_working_set', ctypes.c_size_t), ('active_processes', wintypes.DWORD),
+                    ('affinity', ctypes.c_size_t), ('priority', wintypes.DWORD), ('scheduling', wintypes.DWORD)]
+
+    _kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    _kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    _kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                  wintypes.DWORD, ctypes.c_void_p]
+
+    def _job_allows_unbroken_child():
+        """True only when our (innermost) job is confirmed not KILL_ON_JOB_CLOSE."""
+        in_job = wintypes.BOOL()
+        if not _kernel.IsProcessInJob(_kernel.GetCurrentProcess(), None, ctypes.byref(in_job)) or not in_job:
+            return False  # Unknown, or WinError 5 was not a breakaway refusal.
+        limits = _BasicLimits()
+        if not _kernel.QueryInformationJobObject(None, 2, ctypes.byref(limits), ctypes.sizeof(limits), None):
+            return False
+        return not limits.flags & 0x2000
+
     class _LocalPipeListener(connection.PipeListener):
         def _new_handle(self, first=False):
             flags = _winapi.PIPE_ACCESS_DUPLEX | _winapi.FILE_FLAG_OVERLAPPED
@@ -71,11 +92,35 @@ def _protect(data: bytes, *, decrypt=False) -> bytes:
         _kernel.LocalFree(outgoing.data)
 
 
+CONTROL_WAIT_SECONDS = 20  # Covers a starter's spawn/readiness handshake.
+
+
 @contextmanager
-def receiver_lease(home):
+def receiver_lease(home, name='agent.lock', *, wait=0.0):
     """One agent per data directory; never kill a process by an untrusted PID."""
+    deadline = time.monotonic() + wait
+    with ExitStack() as stack:
+        while True:  # Retry acquisition only, never the guarded body.
+            try:
+                stack.enter_context(_lease(home, name))
+                break
+            except ReceiverBusy:
+                if time.monotonic() >= deadline:
+                    raise
+            time.sleep(0.05)
+        yield
+
+
+def control_lease(home):
+    # Held by start() from spawn until readiness and by stop() throughout, so
+    # a stop can never report success while a spawned child is still pending.
+    return receiver_lease(home, 'control.lock', wait=CONTROL_WAIT_SECONDS)
+
+
+@contextmanager
+def _lease(home, name):
     with SafeDirectory(Path(home) / 'receiver') as directory:
-        path = directory.path / 'agent.lock'
+        path = directory.path / name
         if os.name == 'nt':
             handle = _kernel.CreateFileW(str(path), 0x80000000, 0, None, 4, 0x00200000, None)
             if handle == ctypes.c_void_p(-1).value:
@@ -89,7 +134,7 @@ def receiver_lease(home):
                 _kernel.CloseHandle(handle)
         else:
             import fcntl
-            descriptor = os.open('agent.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory.fd)
+            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory.fd)
             try:
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -170,6 +215,10 @@ class ReceiverController:
     def start(self, *, port=8787, inbox=None):
         if type(port) is not int or not 0 <= port <= 65535 or port in {8765, 8766}:
             raise ValueError('Use an independent receiver port (not 8765/8766)')
+        with control_lease(self.home):
+            return self._start(port, inbox)
+
+    def _start(self, port, inbox):
         status = self.status()
         if status['running']:
             if port and status['port'] != port:
@@ -189,11 +238,13 @@ class ReceiverController:
             try:
                 child = subprocess.Popen(arguments, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **common)
             except OSError as exc:
-                # A parent job without JOB_OBJECT_LIMIT_BREAKAWAY_OK rejects the
-                # flag; the receiver then shares the host's job lifetime.
-                if getattr(exc, 'winerror', None) != 5:
-                    raise
-                child = subprocess.Popen(arguments, creationflags=flags, **common)
+                # A host job without JOB_OBJECT_LIMIT_BREAKAWAY_OK rejects the
+                # flag. Stay in that job only if closing it cannot kill us; the
+                # receiver then reports job_bound so the UI can say so.
+                if getattr(exc, 'winerror', None) != 5 or not _job_allows_unbroken_child():
+                    raise RuntimeError('This host keeps child processes in a job that ends with it; '
+                                       'start pairing from a normal Windows session') from exc
+                child = subprocess.Popen(arguments + ['--job-bound'], creationflags=flags, **common)
         else:
             child = subprocess.Popen(arguments, start_new_session=True, **common)
         self._child = child
@@ -220,6 +271,10 @@ class ReceiverController:
         raise TimeoutError('Receiver startup still pending; inspect its status before retrying')
 
     def stop(self):
+        with control_lease(self.home):
+            return self._stop()
+
+    def _stop(self):
         status = self.status()
         if not status['running']:
             try:
@@ -264,7 +319,7 @@ def _manage(manager, action, params):
     raise ValueError('Unknown receiver action')
 
 
-def run_receiver(home, inbox, port, instance):
+def run_receiver(home, inbox, port, instance, job_bound=False):
     if port in {8765, 8766}:
         raise ValueError('Protected preview/service ports cannot host the receiver')
     home = Path(home).resolve()
@@ -302,7 +357,8 @@ def run_receiver(home, inbox, port, instance):
                             raise ValueError('Receiver control authentication required')
                         action = message.get('action')
                         status = {'running': True, 'pid': os.getpid(), 'port': server.port,
-                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent'}
+                                  'inbox': str(server.inbox), 'instance': instance, 'mode': 'background-agent',
+                                  'job_bound': job_bound}
                         if action == 'status':
                             data = status
                         elif action == 'pairing':
@@ -342,9 +398,10 @@ def main():
     parser.add_argument('--inbox', type=Path, required=True)
     parser.add_argument('--port', type=int, required=True)
     parser.add_argument('--instance', required=True)
+    parser.add_argument('--job-bound', action='store_true')
     args = parser.parse_args()
     try:
-        run_receiver(args.home, args.inbox, args.port, args.instance)
+        run_receiver(args.home, args.inbox, args.port, args.instance, args.job_bound)
     except ReceiverBusy:
         return 2
     except Exception as exc:

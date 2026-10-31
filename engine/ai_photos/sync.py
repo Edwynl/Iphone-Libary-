@@ -397,6 +397,15 @@ class SyncManager:
             source.unlink(missing_ok=True)
             raise SyncFailure(422, 'Final SHA-256 mismatch, transfer reset')
         with self.lock, self.catalog.connection() as db:
+            # Revoke/pause may have happened during the unlocked copy. Staging
+            # is kept on refusal; the verified content-addressed copy is
+            # reused by a later completion of the same bytes.
+            self._ensure_device(db, row['device_id'])
+            if self._paused(db):
+                raise SyncFailure(423, 'Sync is paused by Windows owner')
+            current = db.execute('SELECT status,offset FROM sync_transfers WHERE id=?', (transfer_id,)).fetchone()
+            if current is None or current['status'] != 'pending' or current['offset'] != row['size']:
+                raise SyncFailure(409, 'Transfer changed while finalizing; retrieve its status')
             db.execute("UPDATE sync_transfers SET status='complete',stored_path=?,updated_at=? WHERE id=?",
                        (str(dest), utcnow(), transfer_id))
         # Keep staged bytes until the durable DB commit; a crash can safely retry.

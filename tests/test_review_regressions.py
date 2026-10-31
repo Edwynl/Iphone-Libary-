@@ -316,9 +316,20 @@ def test_s3_backups_include_all_resources_manifest_and_checksums(tmp_path, monke
     cat, manager, device = manager_at(tmp_path)
     transfer(manager, device, b'raw', 'RAW.DNG', 'alternatePhoto', 'a')
     transfer(manager, device, b'video', 'IMG.MOV', 'video', 'b')
-    uploads, objects = [], []
-    fake = SimpleNamespace(upload_file=lambda *a, **k: uploads.append((a, k)),
-                           put_object=lambda **k: objects.append(k))
+    uploads, objects, stored = [], [], {}
+
+    def upload_file(*a, **k):
+        uploads.append((a, k))
+        stored[a[2]] = (Path(a[0]).read_bytes(), k['ExtraArgs']['Metadata'])
+
+    def missing(**k):
+        error = LookupError('NoSuchKey')
+        error.response = {'Error': {'Code': 'NoSuchKey'}}
+        raise error
+
+    fake = SimpleNamespace(upload_file=upload_file, put_object=lambda **k: objects.append(k), get_object=missing,
+                           head_object=lambda **k: {'ContentLength': len(stored[k['Key']][0]),
+                                                    'Metadata': stored[k['Key']][1]})
     monkeypatch.setitem(sys.modules, 'boto3', SimpleNamespace(client=lambda *a, **k: fake))
     result = backup_s3(cat, bucket='test-never-contacted', apply=True)
     assert result['complete'] and result['uploaded'] == 2
