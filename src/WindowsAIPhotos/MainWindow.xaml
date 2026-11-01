@@ -281,14 +281,6 @@
                   SelectionMode="None" SelectionChanged="PhotoGrid_SelectionChanged" Padding="0" Margin="-10,0,-8,0"
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-          <GridView.Resources>
-            <!-- Selection is drawn by the item template (iOS-style check), not the default accent frame. -->
-            <x:Boolean x:Key="GridViewItemSelectionCheckMarkVisualEnabled">False</x:Boolean>
-            <Thickness x:Key="GridViewItemSelectedBorderThickness">0</Thickness>
-            <SolidColorBrush x:Key="GridViewItemBackgroundSelected" Color="Transparent"/>
-            <SolidColorBrush x:Key="GridViewItemBackgroundSelectedPointerOver" Color="Transparent"/>
-            <SolidColorBrush x:Key="GridViewItemBackgroundSelectedPressed" Color="Transparent"/>
-          </GridView.Resources>
           <!-- Room to scroll the last row clear of the floating selection bar. -->
           <GridView.Footer>
             <Border Height="76"/>
@@ -303,6 +295,36 @@
             <Style TargetType="GridViewItem">
               <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
               <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+              <!-- Selection is drawn by the item template (iOS-style check). The stock presenter is
+                   replaced: with its check mark turned off it rebuilds the check on every layout pass
+                   in multiple selection, which ends in a layout-cycle crash on a large grid. -->
+              <Setter Property="Template">
+                <Setter.Value>
+                  <ControlTemplate TargetType="GridViewItem">
+                    <Border x:Name="Hover" CornerRadius="12" Background="Transparent">
+                      <VisualStateManager.VisualStateGroups>
+                        <VisualStateGroup x:Name="CommonStates">
+                          <VisualState x:Name="Normal"/>
+                          <VisualState x:Name="PointerOver">
+                            <VisualState.Setters>
+                              <Setter Target="Hover.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                            </VisualState.Setters>
+                          </VisualState>
+                          <VisualState x:Name="PointerOverSelected">
+                            <VisualState.Setters>
+                              <Setter Target="Hover.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                            </VisualState.Setters>
+                          </VisualState>
+                        </VisualStateGroup>
+                      </VisualStateManager.VisualStateGroups>
+                      <ContentPresenter Content="{TemplateBinding Content}"
+                                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                    </Border>
+                  </ControlTemplate>
+                </Setter.Value>
+              </Setter>
             </Style>
           </GridView.ItemContainerStyle>
           <GridView.ItemTemplate>
