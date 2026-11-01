@@ -13,28 +13,57 @@ def atom(kind, body):
     return struct.pack('>I4s', 8 + len(body), kind) + body
 
 
-def movie(path, live, seconds=3_850_000_000, version=0):
+def default_id(path):
+    # Unless a test says otherwise, a still and a clip with the same stem are one Live Photo.
+    return 'LIVE-' + Path(path).stem.upper()
+
+
+def movie(path, live, seconds=3_850_000_000, version=0, identifier=None):
     # mdat before moov, as iPhone writes it; mvhd time counts from 1904-01-01 UTC.
+    # A Live clip keeps its content identifier in moov/meta: a 'keys' list and an 'ilst' value.
     times = struct.pack('>QQ', seconds, seconds) if version else struct.pack('>II', seconds, seconds)
     mvhd = atom(b'mvhd', bytes([version, 0, 0, 0]) + times + b'\0' * 80)
-    meta = atom(b'meta', atom(b'keys', b'mdta' + LIVE_KEY)) if live else b''
+    meta = b''
+    if live:
+        value = (identifier or default_id(path)).encode()
+        keys = atom(b'keys', struct.pack('>II', 0, 1) + struct.pack('>I4s', 8 + len(LIVE_KEY), b'mdta') + LIVE_KEY)
+        ilst = atom(b'ilst', atom(struct.pack('>I', 1), atom(b'data', struct.pack('>II', 1, 0) + value)))
+        meta = atom(b'meta', atom(b'hdlr', b'\0' * 24) + keys + ilst)
     path.write_bytes(atom(b'ftyp', b'qt  ') + atom(b'mdat', b'\0' * 64) + atom(b'moov', mvhd + meta))
 
 
-def still(path):
-    Image.new('RGB', (4, 4), (90, 30, 30)).save(path, format='JPEG')
+def still(path, identifier=None, taken=None):
+    """A JPEG carrying Apple's maker note with the Live Photo content identifier (tag 0x11)."""
+    value = (identifier or default_id(path)).encode() + b'\0'
+    note = (b'Apple iOS\0' + b'\0\x01' + b'MM' + struct.pack('>H', 1)
+            + struct.pack('>HHII', 0x11, 2, len(value), 14 + 2 + 12 + 4) + b'\0\0\0\0' + value)
+    exif = Image.Exif()
+    exif.get_ifd(0x8769)[0x927C] = note
+    if taken:
+        exif.get_ifd(0x8769)[0x9003] = taken  # DateTimeOriginal
+    Image.new('RGB', (4, 4), (90, 30, 30)).save(path, format='JPEG', exif=exif)
 
 
 def test_probe_reads_live_identifier_and_capture_time(tmp_path):
     live, plain, junk = tmp_path / 'a.mov', tmp_path / 'b.mov', tmp_path / 'c.mov'
-    movie(live, True)
+    movie(live, True, identifier='ABC-123')
     movie(plain, False, version=1)
     junk.write_bytes(b'not a movie')
-    flag, taken = probe_video(live)
-    assert flag is True and taken.startswith('2025-')
+    flag, taken, identifier = probe_video(live)
+    assert flag is True and taken.startswith('2025-') and identifier == 'ABC-123'
     assert probe_video(plain)[0] is False and probe_video(plain)[1].startswith('2025-')
-    assert probe_video(junk) == (False, None)
-    assert probe_video(tmp_path / 'missing.mov') == (None, None)
+    assert probe_video(plain)[2] is None
+    assert probe_video(junk) == (False, None, None)
+    assert probe_video(tmp_path / 'missing.mov') == (None, None, None)
+
+
+def test_still_identifier_from_apple_maker_note(tmp_path):
+    from ai_photos.media import still_content_id
+    still(tmp_path / 'a.jpg', identifier='ABC-123')
+    Image.new('RGB', (4, 4)).save(tmp_path / 'plain.jpg')
+    assert still_content_id(tmp_path / 'a.jpg') == 'ABC-123'
+    assert still_content_id(tmp_path / 'plain.jpg') == ''
+    assert still_content_id(tmp_path / 'missing.jpg') is None
 
 
 def test_live_motion_is_grouped_with_its_still(tmp_path):
@@ -46,29 +75,37 @@ def test_live_motion_is_grouped_with_its_still(tmp_path):
     movie(root / 'IMG_3.MOV', True)          # Live motion whose still is gone
     still(root / 'IMG_4.JPG')
     movie(root / 'IMG_4.MOV', False)         # same stem but no Live identifier
+    still(root / 'IMG_5.HEIC', identifier='A')
+    movie(root / 'IMG_5.MOV', True, identifier='B')  # same stem, a different Live Photo
     (root / 'clip.mp4').write_bytes(b'x')
     c = PhotoCatalog(tmp_path / 'state')
     c.add_folder(str(root))
     c.scan()
     names = lambda kind: sorted(r['name'] for r in c.browse(media_type=kind))
-    assert names('photo') == ['IMG_1.HEIC', 'IMG_4.JPG']
-    assert names('video') == ['IMG_2.MOV', 'IMG_3.MOV', 'IMG_4.MOV', 'clip.mp4']
-    assert 'IMG_1.MOV' not in names('all') and len(names('all')) == 6
+    assert names('photo') == ['IMG_1.HEIC', 'IMG_4.JPG', 'IMG_5.HEIC']
+    assert names('video') == ['IMG_2.MOV', 'IMG_3.MOV', 'IMG_4.MOV', 'IMG_5.MOV', 'clip.mp4']
+    assert 'IMG_1.MOV' not in names('all') and len(names('all')) == 8
     pair = next(r for r in c.browse(media_type='photo') if r['name'] == 'IMG_1.HEIC')
     assert pair['companion'] == str(root / 'IMG_1.MOV')
     video = next(r for r in c.browse(media_type='video') if r['name'] == 'IMG_2.MOV')
     assert video['taken_at'].startswith('2025-')
     stats = c.stats()
-    assert (stats['photos'], stats['videos'], stats['live_photos']) == (2, 4, 1)
+    assert (stats['photos'], stats['videos'], stats['live_photos']) == (3, 5, 1)
     assert c.search('IMG_1')['photos'][0]['name'] == 'IMG_1.HEIC'
     assert len(c.search('IMG_1')['photos']) == 1
-    assert sum(m['count'] for m in virtual_albums(c)['timeline']) == 6
-    # Recycling the still still offers the hidden motion file for review.
+    assert sum(m['count'] for m in virtual_albums(c)['timeline']) == 8
+    # Recycling the still moves its identifier-confirmed motion file with it.
     plan = c.recycle_plan([str(root / 'IMG_1.HEIC')])
-    assert plan['candidate_companions'] == plan['confirmed_companions'] == [str(root / 'IMG_1.MOV')]
-    # Same stem without the Live identifier: offered for review but not confirmed.
-    plan = c.recycle_plan([str(root / 'IMG_4.JPG')])
-    assert plan['candidate_companions'] == [str(root / 'IMG_4.MOV')] and plan['confirmed_companions'] == []
+    assert {f['path'] for f in plan['files']} == {str(root / 'IMG_1.HEIC'), str(root / 'IMG_1.MOV')}
+    assert plan['confirmed_companions'] == [str(root / 'IMG_1.MOV')] and plan['suggested_companions'] == []
+    # Same stem, no identifier or a different one: only mentioned, never moved along.
+    for still_name, motion_name in (('IMG_4.JPG', 'IMG_4.MOV'), ('IMG_5.HEIC', 'IMG_5.MOV')):
+        plan = c.recycle_plan([str(root / still_name)])
+        assert [f['path'] for f in plan['files']] == [str(root / still_name)]
+        assert plan['suggested_companions'] == [str(root / motion_name)] and plan['confirmed_companions'] == []
+    # Selected on purpose, a suggested file is moved like any other.
+    plan = c.recycle_plan([str(root / 'IMG_5.HEIC'), str(root / 'IMG_5.MOV')])
+    assert len(plan['files']) == 2 and plan['suggested_companions'] == []
 
     (root / 'IMG_1.HEIC').unlink()
     c.scan()
@@ -102,6 +139,11 @@ def test_existing_catalog_is_migrated(tmp_path):
     c.scan()  # Unchanged files are classified without being re-indexed.
     assert c.browse(media_type='video') == []
     assert [Path(r['path']).name for r in c.browse()] == ['IMG_9.JPG']
+    # A catalog paired before identifiers were stored reads them once and keeps the pair.
+    with c.connection() as db:
+        db.execute('UPDATE photos SET content_id=NULL')
+    c.scan()
+    assert c.browse()[0]['companion'] == str(root / 'IMG_9.MOV')
 
 
 def test_ai_search_puts_typed_filenames_first(tmp_path):

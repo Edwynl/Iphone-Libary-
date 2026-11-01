@@ -7,7 +7,7 @@ using Windows.Media.Import;
 namespace WindowsAIPhotos.Services;
 
 public sealed record IPhoneImportOutcome(string State, int Found = 0, int AlreadyHave = 0, int Copied = 0,
-    int Duplicates = 0, string? Error = null);
+    int Duplicates = 0, string? Error = null, int Incomplete = 0);
 
 /// <summary>
 /// Copies new camera-roll files from a USB-connected iPhone into the library. The phone
@@ -86,7 +86,7 @@ public sealed class IPhoneImporter : IDisposable
         var plan = await call("device_import_plan", new
         {
             device_id = deviceId,
-            items = files.Select(f => new { key = f.ShellPath, name = f.Name, size = f.Size, date = f.Date })
+            items = files.Select(f => new { key = f.ShellPath, folder = f.Folder, name = f.Name, size = f.Size, date = f.Date })
         });
         var selected = plan.GetProperty("selected").EnumerateArray().Select(e => e.GetString()).ToHashSet();
         var wanted = files.Where(f => selected.Contains(f.ShellPath)).ToList();
@@ -106,7 +106,7 @@ public sealed class IPhoneImporter : IDisposable
                 try
                 {
                     var target = Path.Combine(staging, relative);
-                    CopyStream(file.IdList, target);
+                    CopyStream(file.IdList, target, file.Size);
                     // Keep the phone's time, as Explorer does: undated images sort by it.
                     File.SetLastWriteTimeUtc(target, DateTimeOffset.Parse(file.Date).UtcDateTime);
                 }
@@ -115,7 +115,7 @@ public sealed class IPhoneImporter : IDisposable
                     interruption = ex;  // E.g. unplugged: still keep everything copied so far.
                     break;
                 }
-                done.Add(new { name = file.Name, size = file.Size, date = file.Date, files = new[] { relative } });
+                done.Add(new { folder = file.Folder, name = file.Name, size = file.Size, date = file.Date, files = new[] { relative } });
             }
             return done;
         });
@@ -123,7 +123,8 @@ public sealed class IPhoneImporter : IDisposable
         // The engine files what arrived and removes the staging folders it emptied.
         var result = await call("device_import_commit", new { device_id = deviceId, destination, staging, items = copied });
         return new(interruption is null ? "done" : "interrupted", files.Count, files.Count - wanted.Count,
-            result.GetProperty("imported").GetInt32(), result.GetProperty("duplicates").GetInt32(), interruption?.Message);
+            result.GetProperty("imported").GetInt32(), result.GetProperty("duplicates").GetInt32(), interruption?.Message,
+            result.GetProperty("incomplete").GetInt32());
     }
 
     // IdList: the item's absolute PIDL bytes. A phone item's ShellPath does not parse back into an
@@ -188,7 +189,8 @@ public sealed class IPhoneImporter : IDisposable
         return files;
     }
 
-    /// <summary>Local ISO time the engine files the item under (destination/YYYY-MM).</summary>
+    /// <summary>Local ISO time of the phone item: part of its import identity, and the month it is filed
+    /// under (destination/YYYY-MM) when the file itself has no capture time.</summary>
     /// <remarks>An iPhone item's ModifyDate is always 1899-12-30; System.DateModified holds the
     /// real time, in UTC though its Kind is Unspecified.</remarks>
     private static string ModifiedDate(dynamic item)
@@ -226,8 +228,11 @@ public sealed class IPhoneImporter : IDisposable
         finally { Marshal.FreeCoTaskMem(pidl); }
     }
 
-    private static void CopyStream(byte[] idList, string target)
+    /// <summary>Copies the item to target, published only once all <paramref name="expected"/> bytes
+    /// (the phone's System.Size) have arrived; a short read is an error, never a finished file.</summary>
+    private static void CopyStream(byte[] idList, string target, long expected)
     {
+        if (expected <= 0) throw new IOException($"iPhone 没有报告 {Path.GetFileName(target)} 的大小，无法校验复制是否完整。");
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         var bhidStream = new Guid("1CEBB3AB-7C10-499a-A417-92CA16C4CB83");
         var iidStream = new Guid("0000000c-0000-0000-C000-000000000046");
@@ -243,6 +248,7 @@ public sealed class IPhoneImporter : IDisposable
         var read = Marshal.AllocHGlobal(sizeof(int));
         try
         {
+            long total = 0;
             using (var output = new FileStream(partial, FileMode.CreateNew, FileAccess.Write))
             {
                 while (true)
@@ -251,8 +257,11 @@ public sealed class IPhoneImporter : IDisposable
                     int count = Marshal.ReadInt32(read);
                     if (count == 0) break;
                     output.Write(buffer, 0, count);
+                    total += count;
                 }
             }
+            if (total != expected)
+                throw new IOException($"{Path.GetFileName(target)} 复制不完整：收到 {total:N0} / {expected:N0} 字节。");
             File.Move(partial, target);  // Never overwrites.
         }
         catch

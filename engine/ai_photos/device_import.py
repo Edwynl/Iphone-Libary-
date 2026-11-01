@@ -13,14 +13,19 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .catalog import PhotoCatalog
+from PIL import Image
+
+from .catalog import LIVE_STILL_EXTENSIONS, PhotoCatalog
 from .duplicates import sha256_file
+from .media import is_video, probe_video
 
 STAGING_DIR = ".wap-importing"
 
 
 def _item_id(item: dict) -> str:
-    return f"{str(item['name']).casefold()}|{int(item['size'])}|{item.get('date') or ''}"
+    # The DCIM folder keeps IMG_0001 in 100APPLE and in 101APPLE apart.
+    folder = str(item.get("folder") or "").replace("\\", "/").casefold()
+    return f"{folder}|{str(item['name']).casefold()}|{int(item['size'])}|{item.get('date') or ''}"
 
 
 def _month(date: str | None) -> str:
@@ -28,6 +33,27 @@ def _month(date: str | None) -> str:
         return datetime.fromisoformat(str(date)).strftime("%Y-%m")
     except ValueError:
         return datetime.now().strftime("%Y-%m")
+
+
+def _capture_month(path: Path) -> str | None:
+    """YYYY-MM the file was taken in, from its own metadata: EXIF for photos, the QuickTime
+    header (UTC, shown in local time) for videos. None when it has no capture time."""
+    try:
+        if is_video(path):
+            taken = probe_video(path)[1]
+            return datetime.fromisoformat(taken).astimezone().strftime("%Y-%m") if taken else None
+        with Image.open(path) as image:
+            taken = image.getexif().get_ifd(0x8769).get(0x9003)  # DateTimeOriginal, local time
+        return datetime.strptime(str(taken).strip(), "%Y:%m:%d %H:%M:%S").strftime("%Y-%m") if taken else None
+    except (OSError, ValueError, SyntaxError):
+        return None
+
+
+def _has_size(path: str, size: int) -> bool:
+    try:
+        return os.path.getsize(path) == size
+    except OSError:
+        return False
 
 
 class DeviceImporter:
@@ -68,32 +94,32 @@ class DeviceImporter:
         return {"destination": values.get("destination", ""), "auto": values.get("auto") == "True"}
 
     def plan(self, device_id: str, items: list[dict]) -> dict:
-        """Pick items never imported from this device and not already in the library.
+        """Pick every item without a verified copy on this computer.
 
-        A library file with the same name and byte size counts as present: iPhone
-        originals are multi-megabyte, so an unrelated file matching both is not a
-        realistic risk, and it spares re-copying photos the user copied by hand.
+        An item is skipped only while the file its journal entry points to (its import, or
+        the library file it was found byte-identical to) still exists at the phone's size.
+        Everything else is copied and compared by SHA-256 in commit: a file is never taken
+        as present from its name and size alone.
         """
         with self._db() as db:
-            known = {row[0] for row in db.execute("SELECT item FROM imported WHERE device_id=?", (device_id,))}
-        with self.catalog.connection() as db:
-            library = {(row["name"].casefold(), row["size"]) for row in db.execute("SELECT name,size FROM photos")}
-        selected, skipped_known, skipped_library = [], 0, 0
+            known = dict(db.execute("SELECT item,path FROM imported WHERE device_id=?", (device_id,)).fetchall())
+        selected, skipped_known = [], 0
         for item in items:
-            if _item_id(item) in known:
+            path = known.get(_item_id(item))
+            if path and _has_size(path, int(item["size"])):
                 skipped_known += 1
-            elif (str(item["name"]).casefold(), int(item["size"])) in library:
-                skipped_library += 1
             else:
                 selected.append(item["key"])
-        return {"selected": selected, "skipped_known": skipped_known, "skipped_library": skipped_library}
+        return {"selected": selected, "skipped_known": skipped_known}
 
     def commit(self, device_id: str, destination: str, staging: str, items: list[dict], progress=None) -> dict:
         """File copied items into destination/YYYY-MM, dropping exact (SHA-256) duplicates.
 
         `staging` is destination/.wap-importing/<session>; the app copies each
         DCIM folder (100APPLE, ...) into its own subfolder there. Item `files`
-        are paths relative to `staging`.
+        are paths relative to `staging`; the first is the item itself and must have
+        the item's `size`, or the copy is incomplete: it is discarded and not journaled,
+        so the next import copies it again. Files go under the month they were taken.
         """
         dest = Path(destination).resolve(strict=True)
         stage = Path(staging).resolve(strict=True)
@@ -105,7 +131,7 @@ class DeviceImporter:
                 by_size.setdefault(row["size"], []).append(row["path"])
         digests: dict[str, str] = {}
         suffixes: dict[tuple[Path, str], str] = {}
-        records, imported, duplicates = [], 0, 0
+        records, imported, duplicates, incomplete = [], 0, 0, 0
         now = datetime.now(timezone.utc).isoformat()
         groups = [(item, [self._staged(stage, name) for name in item.get("files", [])]) for item in items]
         # Safety net: a copied file nobody listed (e.g. from an interrupted run)
@@ -114,29 +140,47 @@ class DeviceImporter:
         for path in sorted(stage.rglob("*")):
             if path.is_file() and path.suffix != ".part" and path not in listed:
                 groups.append(({"date": datetime.fromtimestamp(path.stat().st_mtime).isoformat()}, [path]))
+        # A Live Photo's motion is filed under its still's month, so the pair shares a folder.
+        still_months = {}
+        for _, files in groups:
+            for path in files:
+                if path.suffix.lower() in LIVE_STILL_EXTENSIONS and path.is_file():
+                    if month := _capture_month(path):
+                        still_months[(path.parent, path.stem.casefold())] = month
         for done, (item, files) in enumerate(groups, 1):
-            keep = []
-            for path in (p for p in files if p.is_file()):
+            files = [p for p in files if p.is_file()]
+            if files and "name" in item and files[0].stat().st_size != int(item["size"]):
+                for path in files:
+                    path.unlink()  # Our own short copy; the phone's original is untouched.
+                incomplete += 1
+                continue
+            keep, matches = [], []
+            for path in files:
                 digest = sha256_file(path)
-                if self._in_library(path, digest, by_size, digests):
+                if match := self._library_copy(path, digest, by_size, digests):
                     path.unlink()  # Our own fresh copy; the library already has this file.
+                    matches.append(match)
                     duplicates += 1
                 else:
                     keep.append((path, digest))
-            placed = self._place(dest / _month(item.get("date")), keep, suffixes)
+            month = None
+            if files:
+                month = still_months.get((files[0].parent, files[0].stem.casefold())) or _capture_month(files[0])
+            placed = self._place(dest / (month or _month(item.get("date"))), keep, suffixes)
             for path, digest in placed:
                 by_size.setdefault(path.stat().st_size, []).append(str(path))
                 digests[str(path)] = digest
             imported += len(placed)
             if files and "name" in item:
-                records.append((device_id, _item_id(item), str(placed[0][0]) if placed else None,
+                # The verified copy the next plan checks for: this import, or the identical library file.
+                records.append((device_id, _item_id(item), str(placed[0][0]) if placed else matches[0],
                                 "imported" if placed else "duplicate", now))
             if progress and done % 10 == 0:
                 progress({"stage": "importing", "done": done, "total": len(groups)})
         with self._db() as db:
             db.executemany("INSERT OR REPLACE INTO imported VALUES (?,?,?,?,?)", records)
         self._remove_empty_folders(stage)
-        return {"imported": imported, "duplicates": duplicates, "items": len(records),
+        return {"imported": imported, "duplicates": duplicates, "incomplete": incomplete, "items": len(records),
                 "library_folder": self._ensure_library_folder(dest)}
 
     @staticmethod
@@ -156,7 +200,8 @@ class DeviceImporter:
         return path
 
     @staticmethod
-    def _in_library(path: Path, digest: str, by_size: dict[int, list[str]], digests: dict[str, str]) -> bool:
+    def _library_copy(path: Path, digest: str, by_size: dict[int, list[str]], digests: dict[str, str]) -> str | None:
+        """A library file byte-identical to path, if any."""
         for candidate in by_size.get(path.stat().st_size, []):
             if candidate not in digests:
                 try:
@@ -164,8 +209,8 @@ class DeviceImporter:
                 except OSError:
                     continue  # Offline or moved library file: cannot prove a duplicate.
             if digests[candidate] == digest:
-                return True
-        return False
+                return candidate
+        return None
 
     @staticmethod
     def _place(folder: Path, files: list[tuple[Path, str]], suffixes: dict[tuple[Path, str], str]):

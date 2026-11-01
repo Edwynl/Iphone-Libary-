@@ -25,6 +25,23 @@ def test_local_backup_dryrun_and_verification(tmp_path):
     assert img.is_file()
 
 
+def test_raw_dng_is_cataloged_backed_up_and_restored(tmp_path):
+    from ai_photos.backup import restore_local
+    root = tmp_path / 'originals'
+    root.mkdir()
+    raw = root / 'IMG_0600.DNG'  # As a USB import from the iPhone leaves it; never decoded here.
+    raw.write_bytes(b'II*\0' + b'ProRAW sample' * 20)
+    catalog = PhotoCatalog(tmp_path / 'state')
+    catalog.add_folder(str(root))
+    assert catalog.scan()['errors'] == 0
+    assert [r['name'] for r in catalog.browse()] == ['IMG_0600.DNG']
+    target = tmp_path / 'backup'
+    assert backup_local(catalog, target, apply=True)['copied'] == 1
+    restored = tmp_path / 'restored'
+    restore_local(target, restored, apply=True)
+    assert [p.read_bytes() for p in restored.rglob('*.DNG')] == [raw.read_bytes()]
+
+
 def test_prevent_local_backup_loops(tmp_path):
     root = tmp_path / 'pictures'
     root.mkdir()

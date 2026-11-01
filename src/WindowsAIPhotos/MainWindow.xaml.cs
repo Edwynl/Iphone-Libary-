@@ -369,11 +369,13 @@ public sealed partial class MainWindow : Window
                 await ScanAsync();
             }
             if (outcome.State == "nothing-new")
-                StatusText.Text = $"iPhone 已是最新：{outcome.Found:N0} 项都已导入过或已在图库中。";
+                StatusText.Text = $"iPhone 已是最新：{outcome.Found:N0} 项都已核实导入到这台电脑。";
             else
                 StatusText.Text = (outcome.State == "interrupted" ? "iPhone 导入中断（已复制的部分已保存，重新连接后会继续）：" : "iPhone 导入完成：") +
-                    $"新增 {outcome.Copied:N0} 个文件，跳过已有 {outcome.AlreadyHave:N0} 项，" +
-                    $"去掉完全相同的重复 {outcome.Duplicates:N0} 个。保存在 {_importDestination}";
+                    $"新增 {outcome.Copied:N0} 个文件，跳过已核实导入的 {outcome.AlreadyHave:N0} 项，" +
+                    $"去掉与图库内容完全相同的 {outcome.Duplicates:N0} 个。" +
+                    (outcome.Incomplete > 0 ? $"{outcome.Incomplete:N0} 个文件复制不完整已丢弃，下次导入会重新复制。" : "") +
+                    $"保存在 {_importDestination}";
             if (outcome.State == "interrupted")
                 await ShowMessageAsync("iPhone 导入中断", "已复制的照片已保存。请保持数据线连接并解锁 iPhone，再点“从 iPhone 导入”继续。\n\n" + outcome.Error);
         }
@@ -733,13 +735,11 @@ public sealed partial class MainWindow : Window
                 Path = Str(r, "path"), Size = r.GetProperty("size").GetInt64(),
                 MtimeNs = r.GetProperty("mtime_ns").GetInt64()
             }).ToArray();
-            var candidates = plan.GetProperty("candidate_companions").EnumerateArray().Select(r => r.GetString() ?? "").ToArray();
-            int confirmed = plan.TryGetProperty("confirmed_companions", out var c) ? c.GetArrayLength() : 0;
+            int confirmed = plan.GetProperty("confirmed_companions").GetArrayLength();
+            int suggested = plan.GetProperty("suggested_companions").GetArrayLength();
             var list = string.Join(Environment.NewLine, files.Select(f => f.Path));
-            string pairing = (confirmed > 0 ? $"包含 {confirmed} 个实况照片的视频部分（已用 Apple 实况元数据确认）。" : "") +
-                (candidates.Length > confirmed
-                    ? $"另有 {candidates.Length - confirmed} 个同名配套文件仅按文件夹和文件名推测，并非可靠识别；若有无关视频请取消。"
-                    : "");
+            string pairing = (confirmed > 0 ? $"包含 {confirmed} 个实况照片的视频部分（照片与视频的 Apple 实况标识一致）。" : "") +
+                (suggested > 0 ? $"另有 {suggested} 个同名文件无法确认是同一张实况照片，不会移动；如需删除请单独选择。" : "");
             var confirm = new ContentDialog
             {
                 Title = $"核对 {files.Length} 个将移到回收站的文件",

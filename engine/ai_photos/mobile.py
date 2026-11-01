@@ -14,6 +14,7 @@ import re
 import secrets
 import tempfile
 import threading
+import time
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -30,12 +31,13 @@ from .duplicates import sha256_file
 LOG = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 PAGE_SIZE = 60
+MEDIA_LINK_HOURS = 12
 # What a signed media link can open: the catalogued original, its Live Photo motion, its thumbnail.
 _MEDIA_COLUMNS = {"original": "path", "motion": "companion", "thumb": "thumb_path"}
 _MEDIA_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".bmp": "image/bmp",
     ".webp": "image/webp", ".tif": "image/tiff", ".tiff": "image/tiff", ".gif": "image/gif",
-    ".heic": "image/heic", ".heif": "image/heif", ".avif": "image/avif",
+    ".heic": "image/heic", ".heif": "image/heif", ".avif": "image/avif", ".dng": "image/x-adobe-dng",
     ".mov": "video/quicktime", ".mp4": "video/mp4", ".m4v": "video/x-m4v",
 }
 
@@ -132,12 +134,16 @@ class MobileServer:
         if self.thread:
             self.thread.join(timeout=5)
 
-    def media_signature(self, photo_id: int, part: str) -> str:
-        return hmac.new(self.token.encode(), f"{photo_id}:{part}".encode(), hashlib.sha256).hexdigest()
+    def media_signature(self, photo_id: int, part: str, expires: int) -> str:
+        return hmac.new(self.token.encode(), f"{photo_id}:{part}:{expires}".encode(), hashlib.sha256).hexdigest()
 
     def media_url(self, photo_id: int, part: str) -> str:
-        # <img> and <video> cannot send the Authorization header, so each link carries its own signature.
-        return f"/api/media?id={photo_id}&part={part}&sig={self.media_signature(photo_id, part)}"
+        # <img> and <video> cannot send the Authorization header, so each link carries its own
+        # signature for one file. It expires after 12-13 hours, rounded to the hour so a link
+        # stays the same (and cacheable) for an hour.
+        expires = (int(time.time()) // 3600 + MEDIA_LINK_HOURS + 1) * 3600
+        signature = self.media_signature(photo_id, part, expires)
+        return f"/api/media?id={photo_id}&part={part}&exp={expires}&sig={signature}"
 
     def media_file(self, photo_id: int, part: str) -> Path | None:
         """The file behind a media link, only if it still lies inside the library (or the thumbnail cache)."""
@@ -205,6 +211,8 @@ class MobileServer:
         class Handler(BaseHTTPRequestHandler):
             server_version = "WindowsAIPhotos/0.1"
             def log_message(self, fmt, *args):
+                # Request lines carry media link signatures: log the path only.
+                args = tuple(arg.split("?", 1)[0] if isinstance(arg, str) else arg for arg in args)
                 LOG.info("mobile: " + fmt, *args)
 
             def _common_headers(self, ctype: str, length: int, cache: str = "no-store"):
@@ -239,11 +247,14 @@ class MobileServer:
                 service = self.server.mobile
                 try:
                     photo_id, part, signature = int(query["id"][0]), query["part"][0], query["sig"][0]
+                    expires = int(query["exp"][0])
                 except (ValueError, KeyError, IndexError):
                     return self._json(400, {"error": "Invalid media link"})
                 if part not in _MEDIA_COLUMNS or not secrets.compare_digest(
-                        signature, service.media_signature(photo_id, part)):
+                        signature, service.media_signature(photo_id, part, expires)):
                     return self._json(403, {"error": "Invalid media link"})
+                if expires < time.time():
+                    return self._json(403, {"error": "Media link expired; refresh the page"})
                 target = service.media_file(photo_id, part)
                 if target is None:
                     return self._json(404, {"error": "File unavailable"})

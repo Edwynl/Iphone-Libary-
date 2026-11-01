@@ -14,12 +14,11 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import SUPPORTED_EXTENSIONS
+from .config import RAW_EXTENSIONS, SUPPORTED_EXTENSIONS
 from .file_safety import SafeDirectory, check_path, ChecksumMismatch
 from .duplicates import sha256_file
 
 VIDEO_EXTENSIONS = frozenset({".mov", ".mp4", ".m4v"})
-RAW_EXTENSIONS = frozenset({".dng"})
 CHUNK_BYTES = 8 * 1024 * 1024
 MAX_RESOURCE_BYTES = 100 * 1024 ** 3
 MAX_PENDING_PER_DEVICE = 100

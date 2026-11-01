@@ -16,8 +16,9 @@ def test_media_filter_and_candidate_pair(tmp_path):
     assert len(c.browse(media_type='video')) == 2
     assert len(c.browse(media_type='all')) == 3
     plan = c.recycle_plan([str(image)])
-    assert {x['path'] for x in plan['files']} == {str(image), str(movie)}
-    assert plan['candidate_companions'] == [str(movie)]
+    # No matching Live identifiers: the same-name video is only suggested, not moved along.
+    assert [x['path'] for x in plan['files']] == [str(image)]
+    assert plan['suggested_companions'] == [str(movie)] and plan['confirmed_companions'] == []
     assert image.exists() and movie.exists()
     image.write_bytes(b'changed')
     with pytest.raises(ValueError, match='changed since scan'):

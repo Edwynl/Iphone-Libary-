@@ -146,6 +146,22 @@ def test_video_byte_ranges(mobile, library):
     assert status == 416 and headers['Content-Range'] == f'bytes */{len(data)}'
 
 
+def test_media_links_expire_and_are_kept_out_of_logs(mobile, library, caplog):
+    import logging
+    import time
+    caplog.set_level(logging.INFO, logger='ai_photos.mobile')
+    photo = pages(mobile)[0]
+    assert request(mobile, 'GET', photo['original'])[0] == 200
+    assert 'sig=' not in caplog.text and '/api/media' in caplog.text
+    past = int(time.time()) - 60
+    expired = f"/api/media?id={photo['id']}&part=original&exp={past}&sig={mobile.media_signature(photo['id'], 'original', past)}"
+    status, body, _ = request(mobile, 'GET', expired)
+    assert status == 403 and b'expired' in body
+    # Pushing the expiry out breaks the signature.
+    extended = photo['original'].replace('exp=', 'exp=9')
+    assert request(mobile, 'GET', extended)[0] == 403
+
+
 def test_upload_accepts_videos(mobile):
     assert _safe_name('IMG_0001.MOV') == 'IMG_0001.mov'
     assert _safe_name('clip.mp4') == 'clip.mp4'

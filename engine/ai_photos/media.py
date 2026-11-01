@@ -1,4 +1,4 @@
-"""Read-only video helpers: Live Photo/capture-date probe and Windows shell poster frames."""
+"""Read-only media helpers: Live Photo identifiers, video capture dates and Windows shell poster frames."""
 from __future__ import annotations
 
 import os
@@ -12,8 +12,9 @@ from .file_safety import check_path, open_source
 
 VIDEO_EXTENSIONS = frozenset({".mov", ".mp4", ".m4v"})
 # Apple writes this key into the motion half of every Live Photo; the still
-# carries the same identifier. Ordinary iPhone videos do not have it.
+# carries the same identifier (maker note tag 0x11). Ordinary iPhone videos do not have it.
 LIVE_KEY = b"com.apple.quicktime.content.identifier"
+_APPLE_MAKER_NOTE = b"Apple iOS\0"
 _MAX_MOOV = 32 << 20
 _EPOCH_1904 = datetime(1904, 1, 1, tzinfo=timezone.utc)
 
@@ -68,8 +69,55 @@ def _creation_time(moov: bytes) -> str | None:
         return None
 
 
-def probe_video(path: Path) -> tuple[bool | None, str | None]:
-    """Return (has Live Photo identifier, UTC capture time) without decoding.
+def _atoms(data: bytes, start: int = 0, end: int | None = None):
+    """(kind, body start, end) of each box between start and end."""
+    end = len(data) if end is None else end
+    while start + 8 <= end:
+        length, kind = struct.unpack(">I4s", data[start:start + 8])
+        head = 8
+        if length == 1:
+            if start + 16 > end:
+                return
+            length, head = struct.unpack(">Q", data[start + 8:start + 16])[0], 16
+        elif length == 0:
+            length = end - start
+        if length < head or start + length > end:
+            return
+        yield kind, start + head, start + length
+        start += length
+
+
+def _content_identifier(moov: bytes) -> str | None:
+    """The value stored under LIVE_KEY in moov/meta: a 'keys' list plus an 'ilst' of 1-based entries."""
+    for kind, moov_start, moov_end in _atoms(moov):
+        if kind != b"moov":
+            continue
+        for kind, start, end in _atoms(moov, moov_start, moov_end):
+            if kind != b"meta":
+                continue
+            keys, values = [], {}
+            for kind, body, stop in _atoms(moov, start, end):
+                if kind == b"keys":
+                    pos = body + 8  # Version/flags, entry count.
+                    while pos + 8 <= stop:
+                        length = struct.unpack(">I", moov[pos:pos + 4])[0]
+                        if length < 8:
+                            break
+                        keys.append(moov[pos + 8:pos + length])
+                        pos += length
+                elif kind == b"ilst":
+                    for index, item, item_end in _atoms(moov, body, stop):
+                        for kind, data, data_end in _atoms(moov, item, item_end):
+                            if kind == b"data":  # Type indicator and locale, then the value.
+                                values[struct.unpack(">I", index)[0]] = moov[data + 8:data_end]
+            if LIVE_KEY in keys:
+                value = values.get(keys.index(LIVE_KEY) + 1)
+                return value.decode("utf-8", "replace") if value else None
+    return None
+
+
+def probe_video(path: Path) -> tuple[bool | None, str | None, str | None]:
+    """Return (has Live Photo key, UTC capture time, Live Photo content identifier) without decoding.
 
     The flag is None when the file cannot be read, so the caller can retry later.
     """
@@ -78,14 +126,40 @@ def probe_video(path: Path) -> tuple[bool | None, str | None]:
             f.seek(0, 2)
             moov = _read_moov(f, f.tell())
     except (OSError, ValueError):
-        return None, None
+        return None, None, None
     if moov is None:
-        return False, None
-    return LIVE_KEY in moov, _creation_time(moov)
+        return False, None, None
+    return LIVE_KEY in moov, _creation_time(moov), _content_identifier(moov)
+
+
+def still_content_id(path: Path) -> str | None:
+    """A still's Live Photo content identifier from its Apple maker note.
+
+    '' when it has none; None when the file cannot be read now, so the caller can retry later.
+    """
+    try:
+        with Image.open(path) as image:
+            note = image.getexif().get_ifd(0x8769).get(0x927C)
+    except (OSError, ValueError, SyntaxError):
+        return None
+    if not isinstance(note, bytes) or not note.startswith(_APPLE_MAKER_NOTE) or len(note) < 16:
+        return ""
+    # Header, version, byte order, then an IFD whose offsets count from the maker note start.
+    order = "<" if note[12:14] == b"II" else ">"
+    count = struct.unpack(order + "H", note[14:16])[0]
+    for i in range(count):
+        entry = note[16 + 12 * i:28 + 12 * i]
+        if len(entry) < 12:
+            break
+        tag, kind, length, offset = struct.unpack(order + "HHII", entry)
+        if tag == 0x11 and kind == 2:  # ASCII
+            raw = entry[8:8 + length] if length <= 4 else note[offset:offset + length]
+            return raw.split(b"\0")[0].decode("ascii", "replace")
+    return ""
 
 
 def video_thumbnail(path: Path, out: Path, size: int = 384) -> bool:
-    """Save the Windows shell's frame thumbnail of a video as JPEG; False if none.
+    """Save the Windows shell's thumbnail of a video (or RAW photo) as JPEG; False if none.
 
     Uses the same codecs as File Explorer (IShellItemImageFactory). Nothing is
     decoded in-process and the source is only read by the shell.

@@ -16,9 +16,9 @@ from typing import Callable, Iterator
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .config import SKIP_DIRS, SUPPORTED_EXTENSIONS, app_home
+from .config import RAW_EXTENSIONS, SKIP_DIRS, SUPPORTED_EXTENSIONS, app_home
 from .file_safety import is_reparse, check_path
-from .media import VIDEO_EXTENSIONS, probe_video, video_thumbnail
+from .media import VIDEO_EXTENSIONS, probe_video, still_content_id, video_thumbnail
 
 LIVE_STILL_EXTENSIONS = frozenset({".heic", ".heif", ".jpg", ".jpeg"})
 # Live Photo motion files are kept (backups, recycle pairing) but shown through their still.
@@ -130,7 +130,7 @@ class PhotoCatalog:
             columns = {r["name"] for r in db.execute("PRAGMA table_info(photos)")}
             for name, declaration in (("media_kind", "TEXT NOT NULL DEFAULT 'photo'"),
                                       ("live_meta", "INTEGER"), ("companion", "TEXT"),
-                                      ("screenshot", "INTEGER")):
+                                      ("screenshot", "INTEGER"), ("content_id", "TEXT")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE photos ADD COLUMN {name} {declaration}")
             if "media_kind" not in columns:
@@ -207,6 +207,10 @@ class PhotoCatalog:
             if probe_video(path)[0]:
                 return "", 0, 0, None  # Live Photo motion: shown through its still.
             return (str(out) if video_thumbnail(path, out) else ""), 0, 0, None
+        if path.suffix.lower() in RAW_EXTENSIONS:
+            # RAW (ProRAW DNG): Windows' own preview when it has one, else a placeholder card.
+            # Not decoded here and never an error, so it is cataloged and backed up like any photo.
+            return (str(out) if out.is_file() or video_thumbnail(path, out) else ""), 0, 0, None
         try:
             with Image.open(path) as src:
                 image = ImageOps.exif_transpose(src)
@@ -256,7 +260,7 @@ class PhotoCatalog:
                   size=excluded.size,mtime_ns=excluded.mtime_ns,taken_at=excluded.taken_at,
                   width=excluded.width,height=excluded.height,thumb_path=excluded.thumb_path,
                   error=excluded.error,indexed_at=excluded.indexed_at,
-                  media_kind=excluded.media_kind,live_meta=NULL,screenshot=NULL
+                  media_kind=excluded.media_kind,live_meta=NULL,screenshot=NULL,content_id=NULL
             """, (p, root, previous['name'] if previous else path.name, stat.st_size, stat.st_mtime_ns, taken, width, height,
                   thumbnail, error, datetime.now(timezone.utc).isoformat(),
                   'video' if path.suffix.lower() in VIDEO_EXTENSIONS else 'photo'))
@@ -342,7 +346,7 @@ class PhotoCatalog:
                         continue
                     if was_updated:
                         updated += 1
-                    if not decodable and path.suffix.lower() not in VIDEO_EXTENSIONS:
+                    if not decodable and path.suffix.lower() not in VIDEO_EXTENSIONS | RAW_EXTENSIONS:
                         errors += 1  # Every currently undecodable file, changed or not.
                     if encoder is not None and decodable:
                         has_embedding = db.execute(
@@ -350,8 +354,8 @@ class PhotoCatalog:
                             (photo_id, model_id)).fetchone()
                         if not has_embedding:
                             source = p
-                            if path.suffix.lower() in VIDEO_EXTENSIONS:
-                                # A video is searchable through its poster frame.
+                            if path.suffix.lower() in VIDEO_EXTENSIONS | RAW_EXTENSIONS:
+                                # A video or RAW file is searchable through its preview.
                                 source = db.execute("SELECT thumb_path FROM photos WHERE id=?",
                                                     (photo_id,)).fetchone()[0]
                             embed_queue.append((photo_id, source))
@@ -389,23 +393,43 @@ class PhotoCatalog:
         return result
 
     def _link_live_photos(self, db: sqlite3.Connection) -> None:
-        """Classify videos: a Live Photo motion file needs Apple's identifier and a same-stem still."""
-        pending = db.execute("SELECT id,path FROM photos WHERE media_kind!='photo' AND live_meta IS NULL").fetchall()
+        """Classify videos: a Live Photo motion file is paired with the still in its folder that has
+        the same stem and the same Apple content identifier; anything else stays an ordinary video."""
+        # Catalogs from before content_id was stored re-read their Live clips once.
+        pending = db.execute("""SELECT id,path FROM photos WHERE media_kind!='photo'
+                                AND (live_meta IS NULL OR (live_meta=1 AND content_id IS NULL))""").fetchall()
         db.commit()  # Probing reads files; hold no writer meanwhile.
         probed = [(row["id"], *probe_video(Path(row["path"]))) for row in pending]
-        for photo_id, live, taken in probed:
+        for photo_id, live, taken, identifier in probed:
             if live is not None:  # Unreadable now (offline/denied): retry on a later scan.
-                db.execute("UPDATE photos SET live_meta=?,taken_at=COALESCE(?,taken_at) WHERE id=?",
-                           (int(live), taken, photo_id))
-        stills = {}
-        for row in db.execute("SELECT path FROM photos WHERE media_kind='photo'"):
+                db.execute("UPDATE photos SET live_meta=?,taken_at=COALESCE(?,taken_at),content_id=? WHERE id=?",
+                           (int(live), taken, identifier or "", photo_id))
+
+        def place(path: Path) -> tuple[str, str]:
+            return os.path.normcase(str(path.parent)), path.stem.casefold()
+
+        motions = {place(Path(row["path"])) for row in db.execute(
+            "SELECT path FROM photos WHERE media_kind!='photo' AND live_meta=1 AND content_id!=''")}
+        # Only stills that could be a pair are read: same folder and stem as a Live clip.
+        stills, unread = {}, []
+        for row in db.execute("SELECT id,path,content_id FROM photos WHERE media_kind='photo'").fetchall():
             path = Path(row["path"])
-            if path.suffix.lower() in LIVE_STILL_EXTENSIONS:
-                stills.setdefault((os.path.normcase(str(path.parent)), path.stem.casefold()), row["path"])
+            if place(path) not in motions or path.suffix.lower() not in LIVE_STILL_EXTENSIONS:
+                continue
+            if row["content_id"] is None:
+                unread.append((row["id"], path))
+            else:
+                stills.setdefault((place(path), row["content_id"]), row["path"])
+        db.commit()
+        for photo_id, path in unread:
+            identifier = still_content_id(path)
+            if identifier is not None:  # Unreadable now: retry on a later scan.
+                db.execute("UPDATE photos SET content_id=? WHERE id=?", (identifier, photo_id))
+                stills.setdefault((place(path), identifier), str(path))
         db.execute("UPDATE photos SET companion=NULL WHERE companion IS NOT NULL")
-        for row in db.execute("SELECT id,path,live_meta FROM photos WHERE media_kind!='photo'").fetchall():
-            path = Path(row["path"])
-            still = stills.get((os.path.normcase(str(path.parent)), path.stem.casefold())) if row["live_meta"] else None
+        for row in db.execute("SELECT id,path,live_meta,content_id FROM photos WHERE media_kind!='photo'").fetchall():
+            identifier = row["content_id"] if row["live_meta"] else None
+            still = stills.get((place(Path(row["path"])), identifier)) if identifier else None
             db.execute("UPDATE photos SET media_kind=?,companion=? WHERE id=?",
                        ("live_motion" if still else "video", still, row["id"]))
             if still:
@@ -463,7 +487,7 @@ class PhotoCatalog:
             path = Path(row['path'])
             groups.setdefault((os.path.normcase(str(path.parent)), path.stem.casefold()), []).append(row)
         chosen = {}
-        candidates = []
+        suggested = []
         confirmed = []
         for raw in paths:
             key = os.path.normcase(os.path.abspath(raw))
@@ -480,11 +504,16 @@ class PhotoCatalog:
                        if Path(r['path']).suffix.lower() in wanted]
             for companion in matches:
                 other = os.path.normcase(os.path.abspath(companion['path']))
-                if other not in chosen:
+                if other in chosen:
+                    continue
+                # Only an identifier-confirmed pair is moved together; a same-name file is just
+                # mentioned, and the user can select it on its own.
+                if links.get(os.path.normcase(row['path'])) == os.path.normcase(companion['path']):
                     chosen[other] = companion
-                    candidates.append(companion['path'])
-                    if links.get(os.path.normcase(row['path'])) == os.path.normcase(companion['path']):
-                        confirmed.append(companion['path'])
+                    confirmed.append(companion['path'])
+                else:
+                    suggested.append(companion['path'])
+        suggested = [p for p in suggested if os.path.normcase(os.path.abspath(p)) not in chosen]
         for key, row in chosen.items():
             if key in sync:
                 raise ValueError("Synced/shared resource protected; deletion unavailable: " + row['path'])
@@ -492,8 +521,8 @@ class PhotoCatalog:
             info = path.stat()
             if not path.is_file() or info.st_size != row['size'] or info.st_mtime_ns != row['mtime_ns']:
                 raise ValueError("File changed since scan; scan again: " + str(path))
-        return {"files": list(chosen.values()), "candidate_companions": candidates,
-                "confirmed_companions": confirmed}
+        return {"files": list(chosen.values()), "confirmed_companions": confirmed,
+                "suggested_companions": suggested}
 
     def stats(self, model_id: str | None = None) -> dict:
         with self.connection() as db:
