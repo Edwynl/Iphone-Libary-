@@ -19,6 +19,7 @@ from .mobile import default_inbox
 from .sync import SyncManager
 from .organize import virtual_albums
 from .receiver_agent import ReceiverController
+from .device_import import DeviceImporter
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 LOG = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class Worker:
         self._search_lock = threading.Lock()
         self.receiver = ReceiverController(self.catalog.home)
         self.sync_manager = SyncManager(self.catalog, default_inbox())
+        self.device_import = DeviceImporter(self.catalog)
 
     def send(self, payload: dict) -> None:
         with self._send_lock:
@@ -60,9 +62,13 @@ class Worker:
                     self.encoder.install()
                     result = {"installed": True}
                 elif action == "duplicates":
-                    result = find_duplicates(self.catalog, similar_distance=int(params.get("distance", 4)))
+                    result = find_duplicates(self.catalog, similar_distance=int(params.get("distance", 4)),
+                                             progress=lambda e: self.send({"event": "progress", "data": e}))
                 elif action == "backup_local":
                     result = backup_local(self.catalog, params["target"], apply=bool(params.get("apply", False)))
+                elif action == "device_import_commit":
+                    result = self.device_import.commit(params["device_id"], params["destination"], params["staging"],
+                        params.get("items", []), progress=lambda e: self.send({"event": "progress", "data": e}))
                 elif action == "backup_s3":
                     result = backup_s3(self.catalog, bucket=params["bucket"],
                         endpoint_url=params.get("endpoint_url"), prefix=params.get("prefix", "windows-ai-photos"),
@@ -83,7 +89,7 @@ class Worker:
         try:
             action = request.get("action")
             params = request.get("params") or {}
-            if action in ("scan", "install_model", "duplicates", "backup_local", "backup_s3"):
+            if action in ("scan", "install_model", "duplicates", "backup_local", "backup_s3", "device_import_commit"):
                 self._background(request_id, action, params)
                 return
             if action == 'search' and self.encoder.installed:
@@ -117,16 +123,23 @@ class Worker:
                 data = self.receiver.manage(self.sync_manager, 'revoke', device_id=params['device_id'])
             elif action == 'sync_cancel_transfer':
                 data = self.receiver.manage(self.sync_manager, 'cancel', device_id=params['device_id'], transfer_id=params['transfer_id'])
+            elif action == "device_import_settings":
+                data = self.device_import.settings(params or None)
+            elif action == "device_import_plan":
+                data = self.device_import.plan(params["device_id"], params.get("items", []))
             elif action == "add_folder":
                 data = self.catalog.add_folder(params["path"])
             elif action == "folders":
                 data = {"folders": self.catalog.folders()}
             elif action == "remove_folder":
                 data = self.catalog.remove_folder(params["path"])
+            elif action == "recycle_plan":
+                data = self.catalog.recycle_plan(params["paths"])
             elif action == "organize":
                 data = virtual_albums(self.catalog)
             elif action == "browse":
-                data = {"photos": self.catalog.browse(params.get("limit", 120), params.get("offset", 0))}
+                data = {"photos": self.catalog.browse(params.get("limit", 120), params.get("offset", 0),
+                                                      params.get("media_type", "all"), params.get("order", "newest"))}
             elif action == "search":
                 encoder = self.encoder if self.encoder.installed else None
                 data = self.catalog.search(params.get("query", ""), params.get("limit", 120), encoder)

@@ -405,7 +405,7 @@ def test_unverified_or_unloadable_model_is_not_reported_ready(tmp_path, monkeypa
         raise RuntimeError('invalid model configuration')
     monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace())
     monkeypatch.setitem(sys.modules, 'transformers', SimpleNamespace(
-        AutoProcessor=SimpleNamespace(from_pretrained=fail), Siglip2Model=object))
+        AutoProcessor=SimpleNamespace(from_pretrained=fail), AutoModel=object))
     with pytest.raises(RuntimeError, match='invalid model'):
         encoder._ensure_loaded()
     assert encoder.last_error and not encoder.installed

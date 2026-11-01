@@ -72,7 +72,7 @@ class Siglip2Encoder:
     def install(self) -> None:
         try:
             import torch  # noqa: F401 - prerequisite check before large download
-            from transformers import AutoProcessor, Siglip2Model  # noqa: F401
+            from transformers import AutoModel, AutoProcessor  # noqa: F401
             from huggingface_hub import snapshot_download
         except ImportError as exc:
             raise RuntimeError("AI dependencies missing. Run: pip install -r engine/requirements-ai.txt") from exc
@@ -109,7 +109,7 @@ class Siglip2Encoder:
             raise RuntimeError("AI model missing or unverified. Choose Install AI to download/repair the pinned revision.")
         try:
             import torch
-            from transformers import AutoProcessor, Siglip2Model
+            from transformers import AutoModel, AutoProcessor
         except ImportError as exc:
             self.last_error = str(exc)
             raise RuntimeError("AI dependencies missing. Run: pip install -r engine/requirements-ai.txt") from exc
@@ -119,7 +119,10 @@ class Siglip2Encoder:
             path = str(model_path())
             try:
                 processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-                model = Siglip2Model.from_pretrained(path, local_files_only=True)
+                # The pinned repository revision's config identifies a SigLIP
+                # checkpoint. Choose its model implementation from config rather
+                # than forcing SigLIP2 and failing on incompatible weight shapes.
+                model = AutoModel.from_pretrained(path, local_files_only=True)
                 self._device = "cuda" if torch.cuda.is_available() else "cpu"
                 model = model.to(self._device).eval()
                 self._processor = processor

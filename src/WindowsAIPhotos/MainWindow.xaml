@@ -2,16 +2,79 @@
     x:Class="WindowsAIPhotos.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:WindowsAIPhotos.Models"
     Title="Windows AI Photos">
-  <Grid x:Name="Root" Loaded="Root_Loaded" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+  <!-- Frosted-glass look: the window is acrylic, panels are translucent glass on top. -->
+  <Window.SystemBackdrop>
+    <DesktopAcrylicBackdrop/>
+  </Window.SystemBackdrop>
+  <Grid x:Name="Root" Loaded="Root_Loaded" Background="Transparent">
+    <Grid.Resources>
+      <ResourceDictionary>
+        <ResourceDictionary.ThemeDictionaries>
+          <ResourceDictionary x:Key="Light">
+            <SolidColorBrush x:Key="GlassPanelBrush" Color="#99FFFFFF"/>
+            <SolidColorBrush x:Key="GlassStrokeBrush" Color="#CCFFFFFF"/>
+            <!-- In-app acrylic: blurs the photos scrolling underneath. -->
+            <AcrylicBrush x:Key="GlassAcrylicBrush" TintColor="#FFFFFF" TintOpacity="0.45" FallbackColor="#F3F3F3"/>
+          </ResourceDictionary>
+          <ResourceDictionary x:Key="Dark">
+            <SolidColorBrush x:Key="GlassPanelBrush" Color="#1AFFFFFF"/>
+            <SolidColorBrush x:Key="GlassStrokeBrush" Color="#26FFFFFF"/>
+            <AcrylicBrush x:Key="GlassAcrylicBrush" TintColor="#1C1C1E" TintOpacity="0.5" FallbackColor="#2C2C2E"/>
+          </ResourceDictionary>
+        </ResourceDictionary.ThemeDictionaries>
+        <Style TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+          <Setter Property="CornerRadius" Value="10"/>
+        </Style>
+        <Style TargetType="ComboBox" BasedOn="{StaticResource DefaultComboBoxStyle}">
+          <Setter Property="CornerRadius" Value="10"/>
+        </Style>
+        <!-- A photo card, shared by the library grid and the duplicate review. -->
+        <DataTemplate x:Key="PhotoCardTemplate" x:DataType="models:PhotoCard">
+          <Grid RowSpacing="6" Padding="5">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Border CornerRadius="10" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+              <Image x:Phase="1" Source="{x:Bind CreateThumbnail()}" Stretch="UniformToFill"/>
+            </Border>
+            <!-- iOS-style selection: dimmed photo, accent frame and a check, fading in together. -->
+            <Grid Opacity="{x:Bind SelectedOpacity, Mode=OneWay}">
+              <Grid.OpacityTransition>
+                <ScalarTransition/>
+              </Grid.OpacityTransition>
+              <Border CornerRadius="10" Background="#40000000" BorderThickness="3"
+                      BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"/>
+              <Grid Width="26" Height="26" Margin="9" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+                <Ellipse Fill="{ThemeResource AccentFillColorDefaultBrush}" Stroke="White" StrokeThickness="2"/>
+                <FontIcon Glyph="&#xE73E;" FontSize="12" FontWeight="Bold" Foreground="White"/>
+              </Grid>
+            </Grid>
+            <FontIcon Glyph="&#xE768;" FontSize="36" Opacity="{x:Bind PlaceholderOpacity}"
+                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            <Border Opacity="{x:Bind BadgeOpacity}" Background="#B0000000" CornerRadius="4"
+                    Padding="6,2" Margin="6" HorizontalAlignment="Left" VerticalAlignment="Top">
+              <TextBlock Text="{x:Bind Badge}" FontSize="11" Foreground="White"/>
+            </Border>
+            <TextBlock Grid.Row="1" Text="{x:Bind FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Grid.Row="2" Text="{x:Bind Subtitle}" FontSize="11" Opacity="0.6" MaxLines="1"
+                       TextTrimming="CharacterEllipsis"/>
+          </Grid>
+        </DataTemplate>
+      </ResourceDictionary>
+    </Grid.Resources>
     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="232"/>
+      <ColumnDefinition Width="244"/>
       <ColumnDefinition Width="*"/>
     </Grid.ColumnDefinitions>
 
-    <!-- Library navigation sidebar -->
-    <Border Grid.Column="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,1,0">
+    <!-- Library navigation sidebar: a floating glass card -->
+    <Border Grid.Column="0" Margin="10,10,0,10" CornerRadius="16"
+            Background="{ThemeResource GlassPanelBrush}"
+            BorderBrush="{ThemeResource GlassStrokeBrush}" BorderThickness="1">
       <Grid Padding="20,24,16,20" RowSpacing="16">
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto"/>
@@ -33,6 +96,12 @@
           </StackPanel>
         </Button>
         <StackPanel Grid.Row="2" Spacing="10">
+          <ComboBox x:Name="MediaFilter" Header="媒体分类 / Media" SelectedIndex="0" SelectionChanged="MediaFilter_SelectionChanged" HorizontalAlignment="Stretch">
+            <ComboBoxItem Content="全部 / All"/><ComboBoxItem Content="照片 / Photos"/><ComboBoxItem Content="视频 / Videos"/><ComboBoxItem Content="截图 / Screenshots"/>
+          </ComboBox>
+          <ComboBox x:Name="SortOrder" Header="排序 / Sort" SelectedIndex="0" SelectionChanged="MediaFilter_SelectionChanged" HorizontalAlignment="Stretch">
+            <ComboBoxItem Content="最新在前 / Newest first"/><ComboBoxItem Content="最早在前 / Oldest first"/>
+          </ComboBox>
           <TextBlock Text="SOURCE FOLDERS / 来源目录" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
           <Button x:Name="AddFolderButton" Click="AddFolderButton_Click"
                   HorizontalAlignment="Stretch" HorizontalContentAlignment="Left">
@@ -53,8 +122,8 @@
                   HorizontalAlignment="Stretch" Content="Remove selected folder"/>
         </Grid>
         <StackPanel Grid.Row="4" Spacing="8">
-          <Border Padding="12" CornerRadius="10" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                  BorderThickness="1">
+          <Border Padding="12" CornerRadius="12" Background="{ThemeResource GlassPanelBrush}"
+                  BorderBrush="{ThemeResource GlassStrokeBrush}" BorderThickness="1">
             <StackPanel Spacing="5">
               <TextBlock Text="ON-DEVICE AI" FontSize="11" FontWeight="SemiBold" Opacity="0.65"/>
               <TextBlock x:Name="AiState" Text="Checking..." TextWrapping="Wrap" FontSize="12"/>
@@ -68,6 +137,15 @@
                   HorizontalAlignment="Stretch" Content="Organize / 整理照片"/>
           <Button x:Name="DuplicatesButton" Click="DuplicatesButton_Click"
                   HorizontalAlignment="Stretch" Content="Find duplicates / 查找重复"/>
+          <Button x:Name="IPhoneImportButton" Click="IPhoneImportButton_Click"
+                  HorizontalAlignment="Stretch" Content="从 iPhone 导入（数据线）"/>
+          <ToggleSwitch x:Name="AutoImportToggle" Toggled="AutoImportToggle_Toggled" Margin="0,-6,0,0"
+                        OnContent="插上 iPhone 自动导入" OffContent="插上 iPhone 自动导入" FontSize="12"/>
+          <HyperlinkButton x:Name="ImportDestinationButton" Click="ImportDestinationButton_Click" Margin="0,-8,0,0"
+                           Padding="2,0" ToolTipService.ToolTip="iPhone 照片按月份保存到这个文件夹">
+            <TextBlock x:Name="ImportDestinationText" FontSize="11" TextWrapping="Wrap"
+                       Text="保存位置：未设置（点此选择）"/>
+          </HyperlinkButton>
           <Button x:Name="MobileButton" Click="MobileButton_Click"
                   HorizontalAlignment="Stretch" Content="Enable iPhone pairing / 开启同步"/>
           <Button x:Name="ManageSyncButton" Click="ManageSyncButton_Click"
@@ -85,13 +163,12 @@
     </Border>
 
     <!-- Main photo view -->
-    <Grid Grid.Column="1" Padding="24,22,24,12" RowSpacing="14">
+    <Grid Grid.Column="1" Padding="24,40,24,0" RowSpacing="14">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
-        <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
       <Grid ColumnSpacing="12">
         <Grid.ColumnDefinitions>
@@ -99,7 +176,7 @@
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <StackPanel Spacing="5">
-          <TextBlock x:Name="PageTitle" Text="All Photos" FontSize="26" FontWeight="SemiBold"/>
+          <TextBlock x:Name="PageTitle" Text="All Photos" FontSize="30" FontWeight="Bold"/>
           <TextBlock Text="Search by what is in a picture, not just its filename."
                      FontSize="12" Opacity="0.7"/>
         </StackPanel>
@@ -117,8 +194,8 @@
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <TextBox x:Name="SearchBox" PlaceholderText="搜索照片内容，例如：红色裙子、雪山、chiller plant..."
-                 Height="44" FontSize="14" KeyDown="SearchBox_KeyDown"/>
-        <Button x:Name="SearchButton" Grid.Column="1" Width="108" Height="44"
+                 Height="44" FontSize="14" KeyDown="SearchBox_KeyDown" CornerRadius="22"/>
+        <Button x:Name="SearchButton" Grid.Column="1" Width="108" Height="44" CornerRadius="22"
                 Click="SearchButton_Click" Style="{StaticResource AccentButtonStyle}">
           <StackPanel Orientation="Horizontal" Spacing="8">
             <SymbolIcon Symbol="Find"/>
@@ -132,48 +209,203 @@
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
           <TextBlock x:Name="StatusText" Text="Starting local engine..." TextWrapping="Wrap"
                      Opacity="0.75" FontSize="12"/>
-          <TextBlock x:Name="PhotoCount" Grid.Column="1" Text="0 photos" FontSize="12" Opacity="0.7"/>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="0,0,12,0">
+            <TextBlock Text="缩略图" FontSize="12" Opacity="0.7" VerticalAlignment="Center"/>
+            <Slider x:Name="ThumbSize" Width="140" Minimum="110" Maximum="360" StepFrequency="5"
+                    Value="185" VerticalAlignment="Center" ValueChanged="ThumbSize_ValueChanged"
+                    ToolTipService.ToolTip="调整缩略图大小"/>
+          </StackPanel>
+          <TextBlock x:Name="PhotoCount" Grid.Column="2" Text="0 photos" FontSize="12" Opacity="0.7"
+                     VerticalAlignment="Center"/>
         </Grid>
         <ProgressBar x:Name="WorkProgress" IsIndeterminate="True" Visibility="Collapsed" Height="3"/>
       </StackPanel>
 
-      <Grid Grid.Row="3">
+      <!-- Duplicate review: each group's photos side by side; click to mark, double-click to open. -->
+      <Grid x:Name="DuplicateView" Grid.Row="3" RowSpacing="10" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Grid ColumnSpacing="8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="DuplicateSummary" FontSize="12" Opacity="0.75" TextWrapping="Wrap" VerticalAlignment="Center"/>
+          <Button Grid.Column="1" x:Name="SelectExtrasButton" Content="选中多余的完全重复" Click="SelectExtrasButton_Click"
+                  ToolTipService.ToolTip="每组完全相同的照片保留第一张，选中其余副本；相似照片不会自动选中"/>
+          <Button Grid.Column="2" Content="清除选择" Click="ClearDuplicateSelection_Click"/>
+          <Button Grid.Column="3" x:Name="DuplicateRecycleButton" Content="移到回收站 (0)" IsEnabled="False"
+                  Style="{StaticResource AccentButtonStyle}" Click="DuplicateRecycleButton_Click"/>
+          <Button Grid.Column="4" Content="返回图库" Click="CloseDuplicatesButton_Click"/>
+        </Grid>
+        <ScrollViewer Grid.Row="1" Margin="-10,0,-8,0" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled">
+          <ItemsRepeater x:Name="DuplicateGroupList">
+            <ItemsRepeater.ItemTemplate>
+              <DataTemplate x:DataType="models:DuplicateGroup">
+                <StackPanel Spacing="2" Margin="0,6,0,10">
+                  <TextBlock Text="{x:Bind Title, Mode=OneWay}" FontWeight="SemiBold" Margin="10,0,0,0"/>
+                  <GridView ItemsSource="{x:Bind Photos}" ItemTemplate="{StaticResource PhotoCardTemplate}"
+                            SelectionMode="None" IsItemClickEnabled="True" ItemClick="DuplicateCard_Click"
+                            DoubleTapped="DuplicateCard_DoubleTapped"
+                            ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                    <GridView.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <ItemsWrapGrid Orientation="Horizontal" ItemWidth="185" ItemHeight="195"/>
+                      </ItemsPanelTemplate>
+                    </GridView.ItemsPanel>
+                    <GridView.ItemContainerStyle>
+                      <Style TargetType="GridViewItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+                      </Style>
+                    </GridView.ItemContainerStyle>
+                  </GridView>
+                </StackPanel>
+              </DataTemplate>
+            </ItemsRepeater.ItemTemplate>
+          </ItemsRepeater>
+        </ScrollViewer>
+      </Grid>
+
+      <Grid x:Name="LibraryView" Grid.Row="3">
         <GridView x:Name="PhotoGrid" IsItemClickEnabled="True" ItemClick="PhotoGrid_ItemClick"
-                  SelectionMode="None" Padding="0" Margin="-10,0,-8,0"
+                  SelectionMode="None" SelectionChanged="PhotoGrid_SelectionChanged" Padding="0" Margin="-10,0,-8,0"
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <!-- Room to scroll the last row clear of the floating selection bar. -->
+          <GridView.Footer>
+            <Border Height="76"/>
+          </GridView.Footer>
+          <!-- Item size follows the ThumbSize slider (set in code). -->
+          <GridView.ItemsPanel>
+            <ItemsPanelTemplate>
+              <ItemsWrapGrid Orientation="Horizontal" ItemWidth="185" ItemHeight="195"/>
+            </ItemsPanelTemplate>
+          </GridView.ItemsPanel>
+          <GridView.ItemContainerStyle>
+            <Style TargetType="GridViewItem">
+              <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+              <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+              <!-- Selection is drawn by the item template (iOS-style check). The stock presenter is
+                   replaced: with its check mark turned off it rebuilds the check on every layout pass
+                   in multiple selection, which ends in a layout-cycle crash on a large grid. -->
+              <Setter Property="Template">
+                <Setter.Value>
+                  <ControlTemplate TargetType="GridViewItem">
+                    <Border x:Name="Hover" CornerRadius="12" Background="Transparent">
+                      <VisualStateManager.VisualStateGroups>
+                        <VisualStateGroup x:Name="CommonStates">
+                          <VisualState x:Name="Normal"/>
+                          <VisualState x:Name="PointerOver">
+                            <VisualState.Setters>
+                              <Setter Target="Hover.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                            </VisualState.Setters>
+                          </VisualState>
+                          <VisualState x:Name="PointerOverSelected">
+                            <VisualState.Setters>
+                              <Setter Target="Hover.Background" Value="{ThemeResource SubtleFillColorSecondaryBrush}"/>
+                            </VisualState.Setters>
+                          </VisualState>
+                        </VisualStateGroup>
+                      </VisualStateManager.VisualStateGroups>
+                      <ContentPresenter Content="{TemplateBinding Content}"
+                                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                                        HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                        VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                    </Border>
+                  </ControlTemplate>
+                </Setter.Value>
+              </Setter>
+            </Style>
+          </GridView.ItemContainerStyle>
           <GridView.ItemTemplate>
-            <DataTemplate>
-              <StackPanel Width="185" Spacing="6" Padding="5">
-                <Border Width="175" Height="142" CornerRadius="8"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                  <Image Source="{Binding Thumbnail}" Width="175" Height="142"
-                         Stretch="UniformToFill"/>
-                </Border>
-                <TextBlock Text="{Binding FileName}" FontSize="12" MaxLines="1" TextTrimming="CharacterEllipsis"/>
-                <TextBlock Text="{Binding Subtitle}" FontSize="11" Opacity="0.6"/>
-              </StackPanel>
-            </DataTemplate>
+            <StaticResource ResourceKey="PhotoCardTemplate"/>
           </GridView.ItemTemplate>
         </GridView>
+        <!-- Drag-to-select box, drawn above the grid (see MainWindow.BoxSelection.cs). -->
+        <Canvas x:Name="SelectionOverlay" IsHitTestVisible="False">
+          <Rectangle x:Name="SelectionBox" Visibility="Collapsed" Opacity="0.3" RadiusX="2" RadiusY="2"
+                     Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                     Stroke="{ThemeResource AccentFillColorDefaultBrush}" StrokeThickness="2"/>
+        </Canvas>
         <TextBlock x:Name="EmptyState" Text="Choose Add photo folder to begin."
                    HorizontalAlignment="Center" VerticalAlignment="Center"
                    Opacity="0.65" Visibility="Collapsed"/>
+        <!-- Floating glass toolbar; photos scroll underneath it. -->
+        <Border HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,14" Padding="8"
+                CornerRadius="18" Background="{ThemeResource GlassAcrylicBrush}"
+                BorderBrush="{ThemeResource GlassStrokeBrush}" BorderThickness="1">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button x:Name="SelectButton" Content="选择照片" Click="SelectButton_Click"/>
+            <Button x:Name="SelectAllButton" Content="全选已加载" Click="SelectAllButton_Click" Visibility="Collapsed"/>
+            <Button x:Name="RecycleButton" Content="移到回收站 (0)" Click="RecycleButton_Click" IsEnabled="False" Visibility="Collapsed"/>
+            <TextBlock Text="点击照片预览（← → 切换，Esc 关闭）；按住鼠标拖动可框选（Ctrl 追加，Shift+点击连选）；向下滚动自动加载更多"
+                       VerticalAlignment="Center" Margin="6,0,8,0" FontSize="11" Opacity="0.7"
+                       TextTrimming="CharacterEllipsis"/>
+          </StackPanel>
+        </Border>
       </Grid>
+    </Grid>
 
-      <Grid Grid.Row="4" ColumnSpacing="8">
+    <!-- In-app viewer over the whole window (see MainWindow.Viewer.cs). The thumbnail shows at once,
+         the full image replaces it when decoded. -->
+    <Grid x:Name="Viewer" Grid.ColumnSpan="2" Visibility="Collapsed" Background="#FF101012"
+          KeyboardAcceleratorPlacementMode="Hidden">
+      <Grid.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Escape" Invoked="ViewerKey_Invoked"/>
+        <KeyboardAccelerator Key="Left" Invoked="ViewerKey_Invoked"/>
+        <KeyboardAccelerator Key="Right" Invoked="ViewerKey_Invoked"/>
+      </Grid.KeyboardAccelerators>
+      <Image x:Name="ViewerThumb" Stretch="Uniform" Margin="72,88,72,40"/>
+      <Image x:Name="ViewerImage" Stretch="Uniform" Margin="72,88,72,40"/>
+      <MediaPlayerElement x:Name="ViewerVideo" Stretch="Uniform" Margin="72,88,72,40"
+                          AreTransportControlsEnabled="True" Visibility="Collapsed"/>
+      <!-- Below the title bar's drag area, which takes the clicks above it. -->
+      <Grid VerticalAlignment="Top" Margin="24,40,24,0" ColumnSpacing="8">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock Text="Original photos remain untouched · Click an image to open it"
-                   VerticalAlignment="Center" FontSize="11" Opacity="0.6"/>
-        <Button x:Name="LoadMoreButton" Grid.Column="1" Content="Load more" Click="LoadMoreButton_Click"
-                Visibility="Collapsed"/>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock x:Name="ViewerTitle" Foreground="White" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="ViewerSubtitle" Foreground="White" FontSize="12" Opacity="0.65"/>
+        </StackPanel>
+        <Button Grid.Column="1" x:Name="ViewerLiveButton" Click="ViewerLiveButton_Click" Visibility="Collapsed"
+                ToolTipService.ToolTip="播放实况照片的动态部分">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <FontIcon Glyph="&#xE768;" FontSize="12"/>
+            <TextBlock Text="实况"/>
+          </StackPanel>
+        </Button>
+        <Button Grid.Column="2" Content="用系统应用打开" Click="ViewerOpenExternal_Click"/>
+        <Button Grid.Column="3" x:Name="ViewerCloseButton" Click="ViewerCloseButton_Click" ToolTipService.ToolTip="关闭 (Esc)">
+          <FontIcon Glyph="&#xE711;" FontSize="14"/>
+        </Button>
       </Grid>
+      <Button x:Name="ViewerPreviousButton" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="16,0,0,0"
+              Width="44" Height="44" CornerRadius="22" Padding="0" Click="ViewerPreviousButton_Click"
+              ToolTipService.ToolTip="上一张 (←)">
+        <FontIcon Glyph="&#xE76B;" FontSize="16"/>
+      </Button>
+      <Button x:Name="ViewerNextButton" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,16,0"
+              Width="44" Height="44" CornerRadius="22" Padding="0" Click="ViewerNextButton_Click"
+              ToolTipService.ToolTip="下一张 (→)">
+        <FontIcon Glyph="&#xE76C;" FontSize="16"/>
+      </Button>
     </Grid>
+
+    <!-- Drag area of the merged title bar (the caption buttons sit above its right end). -->
+    <Border x:Name="AppTitleBar" Grid.Column="1" Height="34" VerticalAlignment="Top" Background="Transparent"/>
   </Grid>
 </Window>
