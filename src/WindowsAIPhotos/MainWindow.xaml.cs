@@ -374,6 +374,7 @@ public sealed partial class MainWindow : Window
                 StatusText.Text = (outcome.State == "interrupted" ? "iPhone 导入中断（已复制的部分已保存，重新连接后会继续）：" : "iPhone 导入完成：") +
                     $"新增 {outcome.Copied:N0} 个文件，跳过已核实导入的 {outcome.AlreadyHave:N0} 项，" +
                     $"去掉与图库内容完全相同的 {outcome.Duplicates:N0} 个。" +
+                    (outcome.Reverify > 0 ? $"其中 {outcome.Reverify:N0} 项来自旧版导入记录（没有校验值），这次已重新复制并逐字节核对。" : "") +
                     (outcome.Incomplete > 0 ? $"{outcome.Incomplete:N0} 个文件复制不完整已丢弃，下次导入会重新复制。" : "") +
                     $"保存在 {_importDestination}";
             if (outcome.State == "interrupted")

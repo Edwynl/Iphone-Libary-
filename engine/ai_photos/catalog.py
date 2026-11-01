@@ -74,6 +74,12 @@ def _is_screenshot(path: Path) -> bool | None:
     return "screenshot" in str(comment or "").casefold()
 
 
+def _capture_time(exif: Image.Exif) -> str | None:
+    """EXIF local capture time: DateTimeOriginal, kept in the Exif sub-IFD, else DateTime
+    (the last edit) from the main IFD."""
+    return str(exif.get_ifd(0x8769).get(0x9003) or exif.get(306) or "") or None
+
+
 class PhotoCatalog:
     def __init__(self, home: Path | None = None):
         self.home = Path(home) if home else app_home()
@@ -130,7 +136,8 @@ class PhotoCatalog:
             columns = {r["name"] for r in db.execute("PRAGMA table_info(photos)")}
             for name, declaration in (("media_kind", "TEXT NOT NULL DEFAULT 'photo'"),
                                       ("live_meta", "INTEGER"), ("companion", "TEXT"),
-                                      ("screenshot", "INTEGER"), ("content_id", "TEXT")):
+                                      ("screenshot", "INTEGER"), ("content_id", "TEXT"),
+                                      ("capture_read", "INTEGER")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE photos ADD COLUMN {name} {declaration}")
             if "media_kind" not in columns:
@@ -216,7 +223,7 @@ class PhotoCatalog:
                 image = ImageOps.exif_transpose(src)
                 width, height = image.size
                 exif = src.getexif()
-                dt = str(exif.get(36867) or exif.get(306) or "") or None
+                dt = _capture_time(exif)
                 if not out.is_file():
                     image.thumbnail((384, 384), Image.Resampling.LANCZOS)
                     if image.mode not in {"RGB", "L"}:
@@ -254,10 +261,10 @@ class PhotoCatalog:
             taken = taken_or_error if thumbnail else None
             # A changed file is probed again (Live Photo metadata, screenshot) after the walk.
             db.execute("""
-                INSERT INTO photos(path,folder,name,size,mtime_ns,taken_at,width,height,thumb_path,error,indexed_at,media_kind,live_meta)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+                INSERT INTO photos(path,folder,name,size,mtime_ns,taken_at,width,height,thumb_path,error,indexed_at,media_kind,live_meta,capture_read)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,1)
                 ON CONFLICT(path) DO UPDATE SET folder=excluded.folder,name=excluded.name,
-                  size=excluded.size,mtime_ns=excluded.mtime_ns,taken_at=excluded.taken_at,
+                  size=excluded.size,mtime_ns=excluded.mtime_ns,taken_at=excluded.taken_at,capture_read=1,
                   width=excluded.width,height=excluded.height,thumb_path=excluded.thumb_path,
                   error=excluded.error,indexed_at=excluded.indexed_at,
                   media_kind=excluded.media_kind,live_meta=NULL,screenshot=NULL,content_id=NULL
@@ -386,11 +393,30 @@ class PhotoCatalog:
                 db.commit()
             self._link_live_photos(db)
             self._mark_screenshots(db)
+            self._reread_capture_times(db)
         result = {"seen": seen, "updated": updated, "embedded": embedded,
                   "removed": removed, "errors": errors, "elapsed_sec": round(time.monotonic() - t0, 2)}
         if progress:
             progress({"stage": "complete", **result})
         return result
+
+    def _reread_capture_times(self, db: sqlite3.Connection) -> None:
+        """Catalogs from before DateTimeOriginal was read from the Exif sub-IFD stored the last
+        edit time; their photos are read once more."""
+        pending = db.execute("SELECT id,path FROM photos WHERE capture_read IS NULL AND media_kind='photo'").fetchall()
+        db.commit()  # Reading files; hold no writer meanwhile.
+        for row in pending:
+            path = Path(row["path"])
+            if path.suffix.lower() in RAW_EXTENSIONS:
+                taken = None  # Not decoded here.
+            else:
+                try:
+                    with Image.open(path) as image:
+                        taken = _capture_time(image.getexif())
+                except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+                    continue  # Unreadable now (offline/denied): retry on a later scan.
+            db.execute("UPDATE photos SET taken_at=COALESCE(?,taken_at),capture_read=1 WHERE id=?", (taken, row["id"]))
+        db.commit()
 
     def _link_live_photos(self, db: sqlite3.Connection) -> None:
         """Classify videos: a Live Photo motion file is paired with the still in its folder that has

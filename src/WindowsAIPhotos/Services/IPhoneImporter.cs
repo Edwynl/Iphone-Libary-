@@ -7,7 +7,7 @@ using Windows.Media.Import;
 namespace WindowsAIPhotos.Services;
 
 public sealed record IPhoneImportOutcome(string State, int Found = 0, int AlreadyHave = 0, int Copied = 0,
-    int Duplicates = 0, string? Error = null, int Incomplete = 0);
+    int Duplicates = 0, string? Error = null, int Incomplete = 0, int Reverify = 0);
 
 /// <summary>
 /// Copies new camera-roll files from a USB-connected iPhone into the library. The phone
@@ -91,6 +91,9 @@ public sealed class IPhoneImporter : IDisposable
         var selected = plan.GetProperty("selected").EnumerateArray().Select(e => e.GetString()).ToHashSet();
         var wanted = files.Where(f => selected.Contains(f.ShellPath)).ToList();
         if (wanted.Count == 0) return new("nothing-new", files.Count, files.Count);
+        // Items an older version journaled without a checksum: copied once more and compared.
+        int reverify = plan.GetProperty("reverify").GetInt32();
+        string recheck = reverify > 0 ? $"（含 {reverify:N0} 项旧版导入记录，重新复制核对）" : "";
 
         var staging = Path.Combine(destination, StagingDir, DateTime.Now.ToString("yyyyMMdd-HHmmss"));
         Directory.CreateDirectory(staging);
@@ -100,7 +103,7 @@ public sealed class IPhoneImporter : IDisposable
             var done = new List<object>();
             foreach (var file in wanted)
             {
-                status($"正在从 iPhone 复制 {done.Count + 1:N0}/{wanted.Count:N0}：{file.Name}");
+                status($"正在从 iPhone 复制 {done.Count + 1:N0}/{wanted.Count:N0}{recheck}：{file.Name}");
                 // Subfolders keep IMG_0001 from 100APPLE and 101APPLE apart.
                 var relative = Path.Combine(file.Folder, file.Name);
                 try
@@ -124,7 +127,7 @@ public sealed class IPhoneImporter : IDisposable
         var result = await call("device_import_commit", new { device_id = deviceId, destination, staging, items = copied });
         return new(interruption is null ? "done" : "interrupted", files.Count, files.Count - wanted.Count,
             result.GetProperty("imported").GetInt32(), result.GetProperty("duplicates").GetInt32(), interruption?.Message,
-            result.GetProperty("incomplete").GetInt32());
+            result.GetProperty("incomplete").GetInt32(), reverify);
     }
 
     // IdList: the item's absolute PIDL bytes. A phone item's ShellPath does not parse back into an

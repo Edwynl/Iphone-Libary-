@@ -181,3 +181,72 @@ def test_destination_containing_a_library_folder_is_refused(tmp_path):
         importer.settings({'destination': str(tmp_path)})
     assert importer.settings()['destination'] == ''
     importer.settings({'destination': str(library)})  # The library folder itself is fine.
+
+
+def test_an_import_changed_to_other_bytes_of_the_same_size_is_copied_again(tmp_path):
+    catalog, importer, library, dest = make_library(tmp_path)
+    staging = new_staging(dest)
+    items = [dict(item('a', 'IMG_0600.JPG', 6), files=[copy_in(staging, 'IMG_0600.JPG', b'phone!')])]
+    importer.commit('phone', str(dest), staging, items)
+    imported = dest / '2026-10' / 'IMG_0600.JPG'
+    stamp = imported.stat().st_mtime + 60
+    # Opened and saved again unchanged: hashed once more, still the phone's bytes.
+    os.utime(imported, (stamp, stamp))
+    assert importer.plan('phone', items)['skipped_known'] == 1
+    # Replaced by different bytes of the same length: no longer a copy of the original.
+    imported.write_bytes(b'edited')
+    os.utime(imported, (stamp + 60, stamp + 60))
+    assert importer.plan('phone', items)['selected'] == ['a']
+
+
+def test_a_live_pair_shares_one_free_name_when_its_names_are_taken(tmp_path):
+    catalog, importer, library, dest = make_library(tmp_path)
+    month = dest / '2026-10'
+    month.mkdir()
+    still(month / 'IMG_0007.HEIC')  # An older photo, and an unrelated clip already numbered (2).
+    movie(month / 'IMG_0007 (2).MOV', False)
+    staging = new_staging(dest)
+    for folder in ('100APPLE', '101APPLE'):  # Two pairs with one name, from two DCIM folders.
+        (Path(staging) / folder).mkdir()
+        still(Path(staging) / folder / 'IMG_0007.HEIC', identifier=folder, taken='2026:10:31 09:00:00')
+        movie(Path(staging) / folder / 'IMG_0007.MOV', True, identifier=folder)
+    # The app sends the still and its motion as separate items.
+    items = [dict(item(f'{folder}/{name}', name, (Path(staging) / folder / name).stat().st_size, folder=folder),
+                  files=[f'{folder}/{name}'])
+             for folder in ('100APPLE', '101APPLE') for name in ('IMG_0007.HEIC', 'IMG_0007.MOV')]
+    assert importer.commit('phone', str(dest), staging, items)['imported'] == 4
+    assert sorted(p.name for p in month.iterdir()) == [
+        'IMG_0007 (2).MOV', 'IMG_0007 (3).HEIC', 'IMG_0007 (3).MOV',
+        'IMG_0007 (4).HEIC', 'IMG_0007 (4).MOV', 'IMG_0007.HEIC']
+    catalog.scan()
+    pairs = {r['name']: r['companion'] for r in catalog.browse(media_type='photo') if r['companion']}
+    assert pairs == {f'IMG_0007 ({n}).HEIC': str(month.resolve() / f'IMG_0007 ({n}).MOV') for n in (3, 4)}
+
+
+def test_journal_entries_without_a_checksum_are_copied_again_and_verified(tmp_path):
+    catalog, importer, library, dest = make_library(tmp_path)
+    month = dest / '2026-10'
+    month.mkdir()
+    (month / 'IMG_0700.JPG').write_bytes(b'first')
+    (month / 'IMG_0701.JPG').write_bytes(b'other')
+    with importer._db() as db:  # Written by the first version (no folder) and the second (no hash).
+        db.execute("INSERT INTO imported (device_id,item,path,outcome,imported_at) VALUES (?,?,?,?,?)",
+                   ('phone', f'img_0700.jpg|5|{DATE}', str(month / 'IMG_0700.JPG'), 'imported', DATE))
+        db.execute("INSERT INTO imported (device_id,item,path,outcome,imported_at) VALUES (?,?,?,?,?)",
+                   ('phone', f'100apple|img_0701.jpg|5|{DATE}', str(month / 'IMG_0701.JPG'), 'imported', DATE))
+    items = [item('a', 'IMG_0700.JPG', 5), item('b', 'IMG_0701.JPG', 5), item('c', 'IMG_0702.JPG', 5)]
+    plan = importer.plan('phone', items)
+    assert (plan['selected'], plan['reverify']) == (['a', 'b', 'c'], 2)
+
+    catalog.add_folder(str(dest))
+    catalog.scan()
+    staging = new_staging(dest)
+    for entry, data in zip(items, (b'first', b'phone', b'third')):
+        entry['files'] = [copy_in(staging, entry['name'], data)]
+    result = importer.commit('phone', str(dest), staging, items)
+    # IMG_0700 was really there; IMG_0701's recorded file holds other bytes, so the phone's is kept.
+    assert (result['imported'], result['duplicates']) == (2, 1)
+    assert sorted(p.name for p in month.iterdir()) == ['IMG_0700.JPG', 'IMG_0701 (2).JPG', 'IMG_0701.JPG',
+                                                       'IMG_0702.JPG']
+    plan = importer.plan('phone', items)
+    assert (plan['selected'], plan['skipped_known'], plan['reverify']) == ([], 3, 0)
