@@ -155,7 +155,7 @@ class DeviceImporter:
                 by_size.setdefault(row["size"], []).append(row["path"])
         digests: dict[str, str] = {}
         names = ({}, set())  # Name suffix per destination folder and stem group; every name reserved.
-        records, imported, duplicates, incomplete = [], 0, 0, 0
+        journaled, imported, duplicates, incomplete = 0, 0, 0, 0
         now = datetime.now(timezone.utc).isoformat()
         groups = [(item, [self._staged(stage, name) for name in item.get("files", [])]) for item in items]
         # Safety net: a copied file nobody listed (e.g. from an interrupted run)
@@ -204,15 +204,17 @@ class DeviceImporter:
             if files and "name" in item:
                 # The verified copy the next plan checks for: this import, or the identical library file.
                 path, digest = (str(placed[0][0]), placed[0][1]) if placed else matches[0]
-                records.append((device_id, _item_id(item), path, digest, os.stat(path).st_mtime_ns,
+                # Journaled as soon as it is filed: if a later item fails, the retry skips this one.
+                with self._db() as db:
+                    db.execute("""INSERT OR REPLACE INTO imported (device_id,item,path,sha256,mtime_ns,outcome,imported_at)
+                                  VALUES (?,?,?,?,?,?,?)""",
+                               (device_id, _item_id(item), path, digest, os.stat(path).st_mtime_ns,
                                 "imported" if placed else "duplicate", now))
+                journaled += 1
             if progress and done % 10 == 0:
                 progress({"stage": "importing", "done": done, "total": len(groups)})
-        with self._db() as db:
-            db.executemany("""INSERT OR REPLACE INTO imported (device_id,item,path,sha256,mtime_ns,outcome,imported_at)
-                              VALUES (?,?,?,?,?,?,?)""", records)
         self._remove_empty_folders(stage)
-        return {"imported": imported, "duplicates": duplicates, "incomplete": incomplete, "items": len(records),
+        return {"imported": imported, "duplicates": duplicates, "incomplete": incomplete, "items": journaled,
                 "library_folder": self._ensure_library_folder(dest)}
 
     @staticmethod

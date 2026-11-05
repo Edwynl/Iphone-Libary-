@@ -4,7 +4,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
@@ -153,26 +155,75 @@ def _previous_manifest(target):
     return payload, _validate_manifest(json.loads(payload), require_complete=False)
 
 
-def backup_local(catalog: PhotoCatalog, target: Path, *, apply=False) -> dict:
+def _reusable(previous, records):
+    """Records of the last snapshot whose source still has the same size and modification
+    time, by path: their checksum stands without reading the file again."""
+    if previous is None or previous[1]['version'] != 2 or not previous[1]['complete']:
+        return {}
+    snapshot = {r.get('path'): r for r in previous[1]['files']}
+    reusable = {}
+    for record in records:
+        last = snapshot.get(record['path'])
+        if last and (last['size'], last.get('mtime_ns')) == (record['size'], record['mtime_ns']):
+            reusable[record['path']] = last
+    return reusable
+
+
+def _reporter(progress, interval=0.5):
+    last = 0.0
+
+    def report(stage, done, total):
+        nonlocal last
+        now = time.monotonic()
+        if progress and (done == total or now - last >= interval):
+            last = now
+            progress({'stage': stage, 'done': done, 'total': total})
+    return report
+
+
+def _object_size(directory, name):
+    try:
+        with directory.open_read(name) as stream:
+            return os.fstat(stream.fileno()).st_size
+    except FileNotFoundError:
+        return None
+
+
+def backup_local(catalog: PhotoCatalog, target: Path, *, apply=False, verify=False, progress=None) -> dict:
+    """Copy new files into immutable objects and publish a snapshot.
+
+    A file unchanged since the last snapshot (same size and modification time, object
+    present at its size) is not read, so a repeat run costs little. Its bytes are only
+    rechecked with verify=True, which also catches silent corruption of a same-size
+    object or a source edited without changing its time. Restore always verifies.
+    """
+    report = _reporter(progress)
     roots, records, issues = _inventory(catalog)
     if not roots and not records and not issues:
         raise ValueError('No source folders or completed resources registered')
     target = _check_target(catalog, target, roots, records)
     copied = unchanged = total = 0
     saved = []
+    recheck = []
     snapshot_id = None
     latest_published = False
     # Fail closed before any writes if the indexed library cannot be accounted for.
     if not issues:
         try:
             previous = _previous_manifest(target)
+            reusable = {} if verify else _reusable(previous, records)
+            if not apply:
+                # A plan reads no file contents: new or changed files are at most this much.
+                total = sum(r['size'] for r in records if r['path'] not in reusable)
             with SafeDirectory(target) if apply else nullcontext() as root_directory:
                 if apply:
                     _preserve_previous(target, previous)
-                for record in records:
+                for done, record in enumerate(records if apply else [], 1):
+                    report('backing_up', done, len(records))
                     source = Path(record['path'])
                     try:
-                        digest = sha256_file(source)
+                        known = reusable.get(record['path'])
+                        digest = known['sha256'] if known else sha256_file(source)
                         current = source.stat()
                         if (current.st_size, current.st_mtime_ns) != (record['size'], record['mtime_ns']):
                             raise OSError('Source changed after backup planning; rescan before retrying')
@@ -184,30 +235,35 @@ def backup_local(catalog: PhotoCatalog, target: Path, *, apply=False) -> dict:
                         restore_path = Path(record['root_id']) / record['relative']
                         record = dict(record, sha256=digest, backup_path=relative.as_posix(),
                                       restore_path=restore_path.as_posix())
-                        if not apply:
-                            total += record['size']
-                            continue
                         with SafeDirectory(target / relative.parent) as directory:
-                            try:
-                                existing = directory.digest(relative.name)
-                            except FileNotFoundError:
-                                existing = None
-                            if existing == digest:
+                            if known:
+                                size = _object_size(directory, relative.name)
+                                present, intact = size is not None, size == record['size']
+                            else:
+                                try:
+                                    present, intact = True, directory.digest(relative.name) == digest
+                                except FileNotFoundError:
+                                    present = intact = False
+                            if intact:
                                 unchanged += 1
-                            elif existing is not None:
+                            elif present:
                                 raise OSError('Immutable backup object is corrupt; retained without replacement')
                             else:
                                 directory.copy(source, relative.name, expected=digest, replace=False)
                                 copied += 1
                                 total += record['size']
+                                recheck.append(record)
                         saved.append(record)
                     except (OSError, ValueError) as exc:
                         issues.append({'path': str(source), 'error': str(exc)})
                 if apply and not issues:
-                    # Recheck every referenced object before publishing metadata.
-                    # Failed/interrupted runs leave only unreferenced objects;
-                    # they never replace bytes or the last successful manifest.
-                    for record in saved:
+                    # Recheck what this run wrote (with verify, every referenced object)
+                    # before publishing metadata. Failed/interrupted runs leave only
+                    # unreferenced objects; they never replace bytes or the last
+                    # successful manifest.
+                    recheck = saved if verify else recheck
+                    for done, record in enumerate(recheck, 1):
+                        report('verifying', done, len(recheck))
                         path = target / record['backup_path']
                         with SafeDirectory(path.parent) as directory:
                             if directory.digest(path.name) != record['sha256']:

@@ -243,6 +243,12 @@ public sealed partial class MainWindow : Window
             int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
             StatusText.Text = $"正在去重并归档 iPhone 照片 {done:N0}/{total:N0}";
         }
+        else if (stage is "backing_up" or "verifying")
+        {
+            int done = payload.TryGetProperty("done", out var d) ? d.GetInt32() : 0;
+            int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
+            StatusText.Text = (stage == "backing_up" ? "正在备份原始文件 " : "正在校验备份 ") + $"{done:N0}/{total:N0} · 原文件不会被改动";
+        }
         else if (stage == "installing")
             StatusText.Text = "Downloading AI model to your computer (one-time operation)...";
         else if (stage == "warning")
@@ -583,6 +589,7 @@ public sealed partial class MainWindow : Window
             var folder = await picker.PickSingleFolderAsync();
             if (folder is null) return;
             SetBusy(true);
+            StatusText.Text = "正在清点要备份的文件…";
             var planned = await CallAsync("backup_local", new { target = folder.Path, apply = false });
             if (!planned.GetProperty("complete").GetBoolean())
             {
@@ -591,17 +598,25 @@ public sealed partial class MainWindow : Window
             }
             var files = planned.GetProperty("files").GetInt32();
             var bytes = planned.GetProperty("bytes_planned").GetInt64();
+            var verify = new CheckBox { Content = "Verify every file (slow: re-reads the whole library and backup)" };
+            var details = new StackPanel { Spacing = 12 };
+            details.Children.Add(new TextBlock
+            {
+                Text = $"Destination: {folder.Path}\n{files:N0} original resource files\nUp to {bytes / (1024.0 * 1024 * 1024):F2} GB to copy.\nOnly copies. No deletion and no folder mirroring.",
+                TextWrapping = TextWrapping.Wrap
+            });
+            details.Children.Add(verify);
             var dialog = new ContentDialog
             {
                 Title = "Back up original photos?",
-                Content = $"Destination: {folder.Path}\n{files:N0} original resource files\nUp to {bytes / (1024.0 * 1024 * 1024):F2} GB planned.\nOnly copies. No deletion and no folder mirroring.",
+                Content = details,
                 PrimaryButtonText = "Start backup",
                 CloseButtonText = "Cancel",
                 XamlRoot = Root.XamlRoot
             };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-            var done = await CallAsync("backup_local", new { target = folder.Path, apply = true });
-            await ShowMessageAsync(done.GetProperty("complete").GetBoolean() ? "Backup verified" : "Backup incomplete",
+            var done = await CallAsync("backup_local", new { target = folder.Path, apply = true, verify = verify.IsChecked == true });
+            await ShowMessageAsync(done.GetProperty("complete").GetBoolean() ? "Backup complete" : "Backup incomplete",
                 $"Copied: {done.GetProperty("copied").GetInt32()}\nUnchanged: {done.GetProperty("unchanged").GetInt32()}\nIssues: {done.GetProperty("issues").GetRawText()}");
         }
         catch (Exception ex) { ShowError("Backup failed", ex); }
@@ -805,6 +820,6 @@ public sealed partial class MainWindow : Window
     private void ShowError(string prefix, Exception ex)
     {
         StatusText.Text = $"{prefix}: {ex.Message}";
-        Debug.WriteLine(ex);
+        AppLog.Error(prefix, ex);
     }
 }

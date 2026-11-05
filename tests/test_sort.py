@@ -4,7 +4,7 @@ from datetime import datetime
 import pytest
 from PIL import Image
 
-from ai_photos.catalog import PhotoCatalog
+from ai_photos.catalog import _MEDIA_FILTERS, _ORDERS, PhotoCatalog
 
 
 def jpeg(path, taken=None, modified=None):
@@ -38,6 +38,67 @@ def test_browse_sorts_by_capture_date_then_file_time(tmp_path):
     assert [row['name'] for row in catalog.browse(limit=1, offset=1)] == ['video.jpg']
     with pytest.raises(ValueError):
         catalog.browse(order='random')
+
+
+def test_every_browse_page_walks_an_index_instead_of_sorting(tmp_path):
+    catalog = PhotoCatalog(tmp_path / 'state')
+    with catalog.connection() as db:
+        for where in _MEDIA_FILTERS.values():
+            for direction in _ORDERS.values():
+                plan = ' '.join(row['detail'] for row in db.execute(
+                    f"EXPLAIN QUERY PLAN SELECT id FROM photos WHERE {where} "
+                    f"ORDER BY sort_time {direction},id {direction} LIMIT 60 OFFSET 6000"))
+                assert 'TEMP B-TREE' not in plan and 'USING' in plan and 'INDEX' in plan, plan
+
+
+def test_sort_key_follows_every_write_path(tmp_path):
+    library = tmp_path / 'library'
+    library.mkdir()
+    jpeg(library / 'a.jpg', taken='2020:01:01 00:00:00')
+    jpeg(library / 'b.jpg', taken='2021:01:01 00:00:00')
+    catalog = PhotoCatalog(tmp_path / 'state')
+    catalog.add_folder(str(library))
+    catalog.scan()
+    def names():
+        return [row['name'] for row in catalog.browse()]
+
+    assert names() == ['b.jpg', 'a.jpg']
+    with catalog.connection() as db:
+        db.execute("UPDATE photos SET taken_at='2022:01:01 00:00:00' WHERE name='a.jpg'")
+        db.commit()
+    assert names() == ['a.jpg', 'b.jpg']
+    with catalog.connection() as db:  # Without a capture date the file time stands in.
+        db.execute("UPDATE photos SET taken_at=NULL,mtime_ns=? WHERE name='b.jpg'",
+                   (int(datetime(2023, 1, 1).timestamp()) * 10**9,))
+        db.commit()
+    assert names() == ['b.jpg', 'a.jpg']
+    # A rewrite of a changed file goes through the scanner's own upsert.
+    jpeg(library / 'a.jpg', taken='2024:01:01 00:00:00')
+    catalog.scan()
+    assert names() == ['a.jpg', 'b.jpg']
+
+
+def test_an_existing_catalog_is_migrated_in_place(tmp_path):
+    library = tmp_path / 'library'
+    library.mkdir()
+    jpeg(library / 'old.jpg', taken='2020:01:01 00:00:00')
+    jpeg(library / 'new.jpg', taken='2021:01:01 00:00:00')
+    catalog = PhotoCatalog(tmp_path / 'state')
+    catalog.add_folder(str(library))
+    catalog.scan()
+    with catalog.connection() as db:  # As an older version left it.
+        db.execute("DROP TRIGGER photos_sort_insert")
+        db.execute("DROP TRIGGER photos_sort_update")
+        db.execute("DROP INDEX idx_photos_sort")
+        db.execute("DROP INDEX idx_photos_kind_sort")
+        db.execute("CREATE INDEX idx_photos_kind ON photos(media_kind, mtime_ns DESC, id DESC)")
+        db.execute("ALTER TABLE photos DROP COLUMN sort_time")
+        db.commit()
+    migrated = PhotoCatalog(tmp_path / 'state')
+    assert [row['name'] for row in migrated.browse()] == ['new.jpg', 'old.jpg']
+    with migrated.connection() as db:
+        indexes = {row[1] for row in db.execute("PRAGMA index_list(photos)")}
+    assert {'idx_photos_sort', 'idx_photos_kind_sort'} <= indexes and 'idx_photos_kind' not in indexes
 
 
 def test_capture_time_comes_from_the_exif_sub_ifd(tmp_path):

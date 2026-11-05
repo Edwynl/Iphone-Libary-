@@ -36,6 +36,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("backup-local", help="Copy originals to independent storage (dry-run by default)")
     p.add_argument("target")
     p.add_argument("--apply", action="store_true", help="Explicitly perform copy")
+    p.add_argument("--verify", action="store_true", help="Re-read every source and backup object, even if unchanged")
     p = sub.add_parser('restore-local', help='Verify a manifest and restore into an empty independent folder')
     p.add_argument('backup')
     p.add_argument('target')
@@ -88,7 +89,7 @@ def main(argv=None) -> int:
         elif args.cmd == "duplicates":
             data = find_duplicates(cat, similar_distance=args.distance)
         elif args.cmd == "backup-local":
-            data = backup_local(cat, args.target, apply=args.apply)
+            data = backup_local(cat, args.target, apply=args.apply, verify=args.verify)
         elif args.cmd == 'restore-local':
             data = restore_local(args.backup, args.target, apply=args.apply, snapshot=args.snapshot)
         elif args.cmd == 'backup-history':
