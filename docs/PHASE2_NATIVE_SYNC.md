@@ -78,7 +78,7 @@ HTTP 409 with `expected_offset` means iPhone must re-query server before retry. 
 - Apple decides **when** BGProcessingTask runs; not real-time or guaranteed daily execution. Force quitting the app prevents automatic background relaunch. File-backed background URLSession allows an in-flight chunk to continue under normal suspension; new chunks may wait until an iOS scheduling opportunity.
 - The first library backup should be run with Photos Companion in the foreground, plugged in and on Wi-Fi for large videos. Every individual asset export can temporarily consume storage equal to that asset's size (plus an 8 MiB chunk).
 - **No iPhone build or physical Tailscale test was possible in this non-macOS environment.** Current tests validate the Windows protocol, not actual PhotoKit runtime behavior.
-- The Photo Library catalog currently indexes HEIC as a photo (optional `pip install -r engine/requirements-heic.txt` to enable thumbnails) but does not provide video thumbnails/playback in the main photo grid. Videos are stored losslessly and appear in the transfer dashboard.
+- The Photo Library catalog currently indexes HEIC as a photo with thumbnails but does not provide video thumbnails/playback in the main photo grid. Videos are stored losslessly and appear in the transfer dashboard.
 - Cloud backup and Windows installer remain Phase 3; no Android companion or multi-user internet hosting.
 - Server's pairing code rotates when the Windows sync service process restarts, but already-paired per-device tokens remain valid until revoked.
 

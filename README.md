@@ -181,7 +181,14 @@ protocol, Mac/iOS build steps, security requirements and acceptance gates.
 Run on a **Mac with Xcode + XcodeGen**: `bash scripts/build-ios.sh`. There is
 not yet a verified iPhone build, Apple TestFlight distribution, or a signed
 Windows executable. Tests currently exercise the Windows sync protocol only.
-Install `pip install -r engine/requirements-heic.txt` for optional HEIC previews.
+HEIC previews are part of the core requirements (`pi-heif`, decode only).
+
+## Logs
+
+Diagnostics stay on this PC under `%LOCALAPPDATA%\WindowsAIPhotos\logs`: `app.log`
+(desktop app), `worker.log` (photo engine) and `receiver.log` (iPhone receiver).
+Each is capped at about 1 MiB with older copies rotated. They hold file paths and
+errors, never photo contents or pairing tokens.
 
 ## Verified resource backup manifests
 

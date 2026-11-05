@@ -77,6 +77,9 @@ class BoundedHTTPServer(ThreadingHTTPServer):
         finally:
             self._slots.release()
 
+    def handle_error(self, request, client_address):
+        LOG.exception('Receiver request failed')
+
 
 def default_inbox() -> Path:
     override = os.environ.get('AI_PHOTOS_INBOX')
