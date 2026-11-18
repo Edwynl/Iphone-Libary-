@@ -7,7 +7,7 @@ using Windows.Media.Import;
 namespace WindowsAIPhotos.Services;
 
 public sealed record IPhoneImportOutcome(string State, int Found = 0, int AlreadyHave = 0, int Copied = 0,
-    int Duplicates = 0, string? Error = null, int Incomplete = 0, int Reverify = 0);
+    int Duplicates = 0, string? Error = null, int Incomplete = 0, int Reverify = 0, int Unreadable = 0);
 
 /// <summary>
 /// Copies new camera-roll files from a USB-connected iPhone into the library. The phone
@@ -27,6 +27,7 @@ public sealed class IPhoneImporter : IDisposable
         "System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True";
     private const string StagingDir = ".wap-importing";  // Matches engine/ai_photos/device_import.py.
     private const int ThisPc = 17;  // ShellSpecialFolderConstants.ssfDRIVES
+    private const int MaxConsecutiveReadFailures = 3;
     private readonly DeviceWatcher _watcher;
     private bool _enumerated;
 
@@ -97,13 +98,15 @@ public sealed class IPhoneImporter : IDisposable
 
         var staging = Path.Combine(destination, StagingDir, DateTime.Now.ToString("yyyyMMdd-HHmmss"));
         Directory.CreateDirectory(staging);
-        Exception? interruption = null;
+        string? interruption = null;
+        int unreadable = 0;
         var copied = await OnShellThread(() =>
         {
             var done = new List<object>();
+            int consecutive = 0;
             foreach (var file in wanted)
             {
-                status($"正在从 iPhone 复制 {done.Count + 1:N0}/{wanted.Count:N0}{recheck}：{file.Name}");
+                status($"正在从 iPhone 复制 {done.Count + unreadable + 1:N0}/{wanted.Count:N0}{recheck}：{file.Name}");
                 // Subfolders keep IMG_0001 from 100APPLE and 101APPLE apart.
                 var relative = Path.Combine(file.Folder, file.Name);
                 try
@@ -115,9 +118,15 @@ public sealed class IPhoneImporter : IDisposable
                 }
                 catch (Exception ex) when (ex is IOException or COMException or UnauthorizedAccessException)
                 {
-                    interruption = ex;  // E.g. unplugged: still keep everything copied so far.
+                    // One file the phone cannot serve (e.g. 0x8007001E, an original still in iCloud) is
+                    // skipped and retried next import; several in a row means the phone went away.
+                    AppLog.Error($"iPhone import: cannot read {relative}", ex.Message);
+                    unreadable++;
+                    if (++consecutive < MaxConsecutiveReadFailures) continue;
+                    interruption = $"{file.Name}: {ex.Message}";  // Still keep everything copied so far.
                     break;
                 }
+                consecutive = 0;
                 done.Add(new { folder = file.Folder, name = file.Name, size = file.Size, date = file.Date, files = new[] { relative } });
             }
             return done;
@@ -126,8 +135,8 @@ public sealed class IPhoneImporter : IDisposable
         // The engine files what arrived and removes the staging folders it emptied.
         var result = await call("device_import_commit", new { device_id = deviceId, destination, staging, items = copied });
         return new(interruption is null ? "done" : "interrupted", files.Count, files.Count - wanted.Count,
-            result.GetProperty("imported").GetInt32(), result.GetProperty("duplicates").GetInt32(), interruption?.Message,
-            result.GetProperty("incomplete").GetInt32(), reverify);
+            result.GetProperty("imported").GetInt32(), result.GetProperty("duplicates").GetInt32(), interruption,
+            result.GetProperty("incomplete").GetInt32(), reverify, unreadable);
     }
 
     // IdList: the item's absolute PIDL bytes. A phone item's ShellPath does not parse back into an

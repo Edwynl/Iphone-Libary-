@@ -382,6 +382,7 @@ public sealed partial class MainWindow : Window
                     $"去掉与图库内容完全相同的 {outcome.Duplicates:N0} 个。" +
                     (outcome.Reverify > 0 ? $"其中 {outcome.Reverify:N0} 项来自旧版导入记录（没有校验值），这次已重新复制并逐字节核对。" : "") +
                     (outcome.Incomplete > 0 ? $"{outcome.Incomplete:N0} 个文件复制不完整已丢弃，下次导入会重新复制。" : "") +
+                    (outcome.Unreadable > 0 ? $"{outcome.Unreadable:N0} 个文件 iPhone 读不出来已跳过（文件名见 logs\\app.log），下次导入会再试。" : "") +
                     $"保存在 {_importDestination}";
             if (outcome.State == "interrupted")
                 await ShowMessageAsync("iPhone 导入中断", "已复制的照片已保存。请保持数据线连接并解锁 iPhone，再点“从 iPhone 导入”继续。\n\n" + outcome.Error);
