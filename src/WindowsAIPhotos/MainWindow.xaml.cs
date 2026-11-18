@@ -243,6 +243,12 @@ public sealed partial class MainWindow : Window
             int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
             StatusText.Text = $"正在去重并归档 iPhone 照片 {done:N0}/{total:N0}";
         }
+        else if (stage is "backing_up" or "verifying")
+        {
+            int done = payload.TryGetProperty("done", out var d) ? d.GetInt32() : 0;
+            int total = payload.TryGetProperty("total", out var t) ? t.GetInt32() : 0;
+            StatusText.Text = (stage == "backing_up" ? "正在备份原始文件 " : "正在校验备份 ") + $"{done:N0}/{total:N0} · 原文件不会被改动";
+        }
         else if (stage == "installing")
             StatusText.Text = "Downloading AI model to your computer (one-time operation)...";
         else if (stage == "warning")
@@ -376,6 +382,7 @@ public sealed partial class MainWindow : Window
                     $"去掉与图库内容完全相同的 {outcome.Duplicates:N0} 个。" +
                     (outcome.Reverify > 0 ? $"其中 {outcome.Reverify:N0} 项来自旧版导入记录（没有校验值），这次已重新复制并逐字节核对。" : "") +
                     (outcome.Incomplete > 0 ? $"{outcome.Incomplete:N0} 个文件复制不完整已丢弃，下次导入会重新复制。" : "") +
+                    (outcome.Unreadable > 0 ? $"{outcome.Unreadable:N0} 个文件 iPhone 读不出来已跳过（文件名见 logs\\app.log），下次导入会再试。" : "") +
                     $"保存在 {_importDestination}";
             if (outcome.State == "interrupted")
                 await ShowMessageAsync("iPhone 导入中断", "已复制的照片已保存。请保持数据线连接并解锁 iPhone，再点“从 iPhone 导入”继续。\n\n" + outcome.Error);
@@ -583,6 +590,7 @@ public sealed partial class MainWindow : Window
             var folder = await picker.PickSingleFolderAsync();
             if (folder is null) return;
             SetBusy(true);
+            StatusText.Text = "正在清点要备份的文件…";
             var planned = await CallAsync("backup_local", new { target = folder.Path, apply = false });
             if (!planned.GetProperty("complete").GetBoolean())
             {
@@ -591,17 +599,25 @@ public sealed partial class MainWindow : Window
             }
             var files = planned.GetProperty("files").GetInt32();
             var bytes = planned.GetProperty("bytes_planned").GetInt64();
+            var verify = new CheckBox { Content = "Verify every file (slow: re-reads the whole library and backup)" };
+            var details = new StackPanel { Spacing = 12 };
+            details.Children.Add(new TextBlock
+            {
+                Text = $"Destination: {folder.Path}\n{files:N0} original resource files\nUp to {bytes / (1024.0 * 1024 * 1024):F2} GB to copy.\nOnly copies. No deletion and no folder mirroring.",
+                TextWrapping = TextWrapping.Wrap
+            });
+            details.Children.Add(verify);
             var dialog = new ContentDialog
             {
                 Title = "Back up original photos?",
-                Content = $"Destination: {folder.Path}\n{files:N0} original resource files\nUp to {bytes / (1024.0 * 1024 * 1024):F2} GB planned.\nOnly copies. No deletion and no folder mirroring.",
+                Content = details,
                 PrimaryButtonText = "Start backup",
                 CloseButtonText = "Cancel",
                 XamlRoot = Root.XamlRoot
             };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
-            var done = await CallAsync("backup_local", new { target = folder.Path, apply = true });
-            await ShowMessageAsync(done.GetProperty("complete").GetBoolean() ? "Backup verified" : "Backup incomplete",
+            var done = await CallAsync("backup_local", new { target = folder.Path, apply = true, verify = verify.IsChecked == true });
+            await ShowMessageAsync(done.GetProperty("complete").GetBoolean() ? "Backup complete" : "Backup incomplete",
                 $"Copied: {done.GetProperty("copied").GetInt32()}\nUnchanged: {done.GetProperty("unchanged").GetInt32()}\nIssues: {done.GetProperty("issues").GetRawText()}");
         }
         catch (Exception ex) { ShowError("Backup failed", ex); }
@@ -805,6 +821,6 @@ public sealed partial class MainWindow : Window
     private void ShowError(string prefix, Exception ex)
     {
         StatusText.Text = $"{prefix}: {ex.Message}";
-        Debug.WriteLine(ex);
+        AppLog.Error(prefix, ex);
     }
 }

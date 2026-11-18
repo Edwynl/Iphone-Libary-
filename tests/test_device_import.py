@@ -58,6 +58,36 @@ def test_a_same_name_and_size_library_file_is_not_taken_as_imported(tmp_path):
     assert (dest / '2026-10' / 'IMG_0300.JPG').read_bytes() == data
 
 
+def test_a_failure_midway_keeps_what_was_filed_for_the_retry(tmp_path, monkeypatch):
+    _, importer, _, dest = make_library(tmp_path)
+    first, second = b'first photo', b'second photo!'
+    items = [item('a', 'IMG_0301.JPG', len(first)), item('b', 'IMG_0302.JPG', len(second))]
+    staging = new_staging(dest)
+    items[0]['files'] = [copy_in(staging, 'IMG_0301.JPG', first)]
+    items[1]['files'] = [copy_in(staging, 'IMG_0302.JPG', second)]
+    place = DeviceImporter._place
+    calls = []
+
+    def fail_on_second(*args):
+        calls.append(args)
+        if len(calls) == 2:
+            raise OSError('disk full')
+        return place(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DeviceImporter, '_place', staticmethod(fail_on_second))
+        with pytest.raises(OSError, match='disk full'):
+            importer.commit('phone', str(dest), staging, items)
+
+    # Only the unfiled item is copied again, so the retry cannot create "IMG_0301 (2).JPG".
+    assert importer.plan('phone', items)['selected'] == ['b']
+    retry = dest / STAGING_DIR / '20261031-091600'
+    retry.mkdir()
+    result = importer.commit('phone', str(dest), str(retry), [dict(items[1], files=[copy_in(retry, 'IMG_0302.JPG', second)])])
+    assert result['imported'] == 1
+    assert sorted(p.name for p in (dest / '2026-10').iterdir()) == ['IMG_0301.JPG', 'IMG_0302.JPG']
+
+
 def test_commit_files_new_items_and_drops_exact_duplicates(tmp_path):
     from datetime import timedelta, timezone
     catalog, importer, library, dest = make_library(tmp_path)

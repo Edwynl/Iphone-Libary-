@@ -12,6 +12,8 @@ from PIL import Image, ImageOps
 from .config import MODEL_ID, MODEL_REVISION, model_path
 from .file_safety import SafeDirectory
 
+_MAX_TEXT_TOKENS = 64
+
 
 def _normalise(vector: np.ndarray) -> np.ndarray:
     vector = np.asarray(vector, dtype=np.float32).reshape(-1)
@@ -137,8 +139,10 @@ class Siglip2Encoder:
         import torch
 
         with self._lock, torch.inference_mode():
-            # SigLIP2 text encoder must be padded to max length as trained.
-            values = self._processor(text=[text], padding="max_length", return_tensors="pt")
+            # SigLIP2 text encoder must be padded to max length as trained. The model
+            # rejects anything longer than this, so a long query is cut off, not failed.
+            values = self._processor(text=[text], padding="max_length", truncation=True,
+                                     max_length=_MAX_TEXT_TOKENS, return_tensors="pt")
             values = {k: v.to(self._device) for k, v in values.items()}
             output = self._model.get_text_features(**values)
             features = output.pooler_output if hasattr(output, "pooler_output") else output

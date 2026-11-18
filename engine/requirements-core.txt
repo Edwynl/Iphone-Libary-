@@ -1,3 +1,6 @@
 # Required for scanning, thumbnails, vector indexing and filename search.
 Pillow>=11.1,<13
 numpy>=1.26,<3
+# HEIC/HEIF is the iPhone's default photo format. The app only decodes it, so
+# this is the decode-only build: pillow-heif's Windows wheels bundle GPLv2 x265.
+pi-heif>=1.1,<2

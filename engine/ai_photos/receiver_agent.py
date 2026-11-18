@@ -10,6 +10,7 @@ import argparse
 import base64
 import ctypes
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -22,7 +23,10 @@ from pathlib import Path
 
 from .catalog import PhotoCatalog
 from .file_safety import SafeDirectory, check_path, open_source
+from .logs import setup_logging
 from .mobile import MobileServer, default_inbox
+
+LOG = logging.getLogger(__name__)
 
 
 class ReceiverBusy(RuntimeError):
@@ -373,7 +377,8 @@ def run_receiver(home, inbox, port, instance, job_bound=False):
                     except Exception as exc:
                         # Any failed request (SyncFailure, sqlite3.Error, ...) is
                         # reported to its caller; it never stops the receiver.
-                        response = {'ok': False, 'instance': instance, 'error': str(exc)}
+                        LOG.warning('Receiver control request failed: %s', exc)
+                        response ={'ok': False, 'instance': instance, 'error': str(exc)}
                     try:
                         channel.send_bytes(json.dumps(response).encode())
                     except (OSError, EOFError):
@@ -401,11 +406,13 @@ def main():
     parser.add_argument('--instance', required=True)
     parser.add_argument('--job-bound', action='store_true')
     args = parser.parse_args()
+    setup_logging('receiver', args.home)
     try:
         run_receiver(args.home, args.inbox, args.port, args.instance, args.job_bound)
     except ReceiverBusy:
         return 2
     except Exception as exc:
+        LOG.exception('Receiver stopped')
         with SafeDirectory(args.home / 'receiver') as directory:
             directory.write('last-error.json', json.dumps({'instance': args.instance, 'error': str(exc)}).encode())
         return 1

@@ -40,8 +40,8 @@ _SCREENSHOT_NAME = re.compile(r"screen[ _-]?shot|截图|截屏", re.IGNORECASE)
 LOG = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 150_000_000
 try:
-    import pillow_heif  # type: ignore[import-not-found]
-    pillow_heif.register_heif_opener()
+    import pi_heif  # type: ignore[import-not-found]
+    pi_heif.register_heif_opener()
 except ImportError:
     # HEIC originals remain cataloged with an explicit decoder error.
     pass
@@ -137,13 +137,23 @@ class PhotoCatalog:
             for name, declaration in (("media_kind", "TEXT NOT NULL DEFAULT 'photo'"),
                                       ("live_meta", "INTEGER"), ("companion", "TEXT"),
                                       ("screenshot", "INTEGER"), ("content_id", "TEXT"),
-                                      ("capture_read", "INTEGER")):
+                                      ("capture_read", "INTEGER"), ("sort_time", "TEXT")):
                 if name not in columns:
                     db.execute(f"ALTER TABLE photos ADD COLUMN {name} {declaration}")
             if "media_kind" not in columns:
                 db.execute("UPDATE photos SET media_kind='video' WHERE " + " OR ".join(
                     f"lower(path) LIKE '%{suffix}'" for suffix in sorted(VIDEO_EXTENSIONS)))
-            db.execute("CREATE INDEX IF NOT EXISTS idx_photos_kind ON photos(media_kind, mtime_ns DESC, id DESC)")
+            if "sort_time" not in columns:
+                db.execute(f"UPDATE photos SET sort_time={_SORT_TIME}")
+            # 'localtime' cannot go in a generated column or expression index, so the sort key
+            # is stored. Triggers keep it right however taken_at or mtime_ns get written.
+            db.execute(f"""CREATE TRIGGER IF NOT EXISTS photos_sort_insert AFTER INSERT ON photos BEGIN
+                           UPDATE photos SET sort_time={_SORT_TIME} WHERE id=NEW.id; END""")
+            db.execute(f"""CREATE TRIGGER IF NOT EXISTS photos_sort_update AFTER UPDATE OF taken_at,mtime_ns ON photos BEGIN
+                           UPDATE photos SET sort_time={_SORT_TIME} WHERE id=NEW.id; END""")
+            db.execute("DROP INDEX IF EXISTS idx_photos_kind")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_photos_sort ON photos(sort_time DESC, id DESC)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_photos_kind_sort ON photos(media_kind, sort_time DESC, id DESC)")
 
     def add_folder(self, folder: str) -> dict:
         path = Path(folder).expanduser().resolve(strict=True)
@@ -491,7 +501,7 @@ class PhotoCatalog:
         with self.connection() as db:
             rows = db.execute(f"""
                 SELECT {_COLUMNS} FROM photos
-                WHERE {where} ORDER BY {_SORT_TIME} {direction},id {direction} LIMIT ? OFFSET ?
+                WHERE {where} ORDER BY sort_time {direction},id {direction} LIMIT ? OFFSET ?
             """, (max(1, min(int(limit), 300)), max(0, int(offset)))).fetchall()
             return [dict(row) for row in rows]
 

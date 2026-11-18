@@ -21,7 +21,6 @@ from .organize import virtual_albums
 from .receiver_agent import ReceiverController
 from .device_import import DeviceImporter
 
-logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 LOG = logging.getLogger(__name__)
 
 
@@ -65,7 +64,9 @@ class Worker:
                     result = find_duplicates(self.catalog, similar_distance=int(params.get("distance", 4)),
                                              progress=lambda e: self.send({"event": "progress", "data": e}))
                 elif action == "backup_local":
-                    result = backup_local(self.catalog, params["target"], apply=bool(params.get("apply", False)))
+                    result = backup_local(self.catalog, params["target"], apply=bool(params.get("apply", False)),
+                                          verify=bool(params.get("verify", False)),
+                                          progress=lambda e: self.send({"event": "progress", "data": e}))
                 elif action == "device_import_commit":
                     result = self.device_import.commit(params["device_id"], params["destination"], params["staging"],
                         params.get("items", []), progress=lambda e: self.send({"event": "progress", "data": e}))
@@ -100,6 +101,7 @@ class Worker:
                         result = self.catalog.search(params.get('query', ''), params.get('limit', 120), self.encoder)
                         self.send({'id': request_id, 'ok': True, 'data': result})
                     except Exception as exc:
+                        LOG.exception('Search failed')
                         self.send({'id': request_id, 'ok': False, 'error': str(exc)})
                     finally:
                         self._search_lock.release()
