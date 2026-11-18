@@ -12,6 +12,8 @@ from PIL import Image, ImageOps
 from .config import MODEL_ID, MODEL_REVISION, model_path
 from .file_safety import SafeDirectory
 
+_MAX_TEXT_TOKENS = 64
+
 
 def _normalise(vector: np.ndarray) -> np.ndarray:
     vector = np.asarray(vector, dtype=np.float32).reshape(-1)
@@ -72,7 +74,7 @@ class Siglip2Encoder:
     def install(self) -> None:
         try:
             import torch  # noqa: F401 - prerequisite check before large download
-            from transformers import AutoProcessor, Siglip2Model  # noqa: F401
+            from transformers import AutoModel, AutoProcessor  # noqa: F401
             from huggingface_hub import snapshot_download
         except ImportError as exc:
             raise RuntimeError("AI dependencies missing. Run: pip install -r engine/requirements-ai.txt") from exc
@@ -109,7 +111,7 @@ class Siglip2Encoder:
             raise RuntimeError("AI model missing or unverified. Choose Install AI to download/repair the pinned revision.")
         try:
             import torch
-            from transformers import AutoProcessor, Siglip2Model
+            from transformers import AutoModel, AutoProcessor
         except ImportError as exc:
             self.last_error = str(exc)
             raise RuntimeError("AI dependencies missing. Run: pip install -r engine/requirements-ai.txt") from exc
@@ -119,7 +121,10 @@ class Siglip2Encoder:
             path = str(model_path())
             try:
                 processor = AutoProcessor.from_pretrained(path, local_files_only=True)
-                model = Siglip2Model.from_pretrained(path, local_files_only=True)
+                # The pinned repository revision's config identifies a SigLIP
+                # checkpoint. Choose its model implementation from config rather
+                # than forcing SigLIP2 and failing on incompatible weight shapes.
+                model = AutoModel.from_pretrained(path, local_files_only=True)
                 self._device = "cuda" if torch.cuda.is_available() else "cpu"
                 model = model.to(self._device).eval()
                 self._processor = processor
@@ -134,8 +139,10 @@ class Siglip2Encoder:
         import torch
 
         with self._lock, torch.inference_mode():
-            # SigLIP2 text encoder must be padded to max length as trained.
-            values = self._processor(text=[text], padding="max_length", return_tensors="pt")
+            # SigLIP2 text encoder must be padded to max length as trained. The model
+            # rejects anything longer than this, so a long query is cut off, not failed.
+            values = self._processor(text=[text], padding="max_length", truncation=True,
+                                     max_length=_MAX_TEXT_TOKENS, return_tensors="pt")
             values = {k: v.to(self._device) for k, v in values.items()}
             output = self._model.get_text_features(**values)
             features = output.pooler_output if hasattr(output, "pooler_output") else output

@@ -57,7 +57,7 @@ def _components(edges: set[tuple[int, int]], keys: set[int]) -> list[list[int]]:
                   key=lambda x: (-len(x), x[0]))
 
 
-def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4) -> dict:
+def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4, progress=None) -> dict:
     """Cache fingerprints keyed by size+mtime; return groups for human review only.
 
     Similarity is a heuristic, NOT permission to delete files. Only SHA matches
@@ -73,11 +73,15 @@ def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4) -> dict:
             sha256 TEXT NOT NULL,
             dhash TEXT
         )""")
-        rows = db.execute("SELECT id,path,name,size,mtime_ns FROM photos ORDER BY id").fetchall()
+        # Live Photo motion is left out: it is reviewed and recycled together with its still.
+        rows = db.execute("""SELECT id,path,name,size,mtime_ns,thumb_path,taken_at,media_kind,companion
+                             FROM photos WHERE media_kind!='live_motion' ORDER BY id""").fetchall()
         photos = {}
         fingerprints = []
         calculated = 0
-        for row in rows:
+        for index, row in enumerate(rows):
+            if progress and index % 25 == 0:
+                progress({"stage": "fingerprinting", "done": index, "total": len(rows)})
             photo_id = row["id"]
             path = Path(row["path"])
             if not path.is_file() or path.is_symlink():
@@ -99,8 +103,9 @@ def find_duplicates(catalog: PhotoCatalog, similar_distance: int = 4) -> dict:
                       size=excluded.size,mtime_ns=excluded.mtime_ns,
                       sha256=excluded.sha256,dhash=excluded.dhash""",
                                (photo_id, stat.st_size, stat.st_mtime_ns, sha, dhash))
+                    db.commit()  # Hashing large videos must not hold the SQLite writer.
                     calculated += 1
-                photos[photo_id] = {"id": photo_id, "name": row["name"], "path": str(path)}
+                photos[photo_id] = {**dict(row), "path": str(path)}  # What a review card shows.
                 fingerprints.append((photo_id, sha, int(dhash, 16) if dhash else None))
             except (OSError, PermissionError):
                 continue

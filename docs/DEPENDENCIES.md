@@ -20,6 +20,7 @@ This is a metadata inventory for the resolved Windows Python 3.11 dependencies a
 | [networkx](https://pypi.org/pypi/networkx/3.6.1/json) | 3.6.1 | BSD-3-Clause |
 | [numpy](https://pypi.org/pypi/numpy/2.4.6/json) | 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 |
 | [packaging](https://pypi.org/pypi/packaging/26.3/json) | 26.3 | Apache-2.0 OR BSD-2-Clause |
+| [pi-heif](https://pypi.org/pypi/pi-heif/1.4.0/json) | 1.4.0 | BSD-3-Clause source; binary wheels are LGPLv3 (bundled libheif, libde265) |
 | [pillow](https://pypi.org/pypi/pillow/12.3.0/json) | 12.3.0 | MIT-CMU |
 | [pluggy](https://pypi.org/pypi/pluggy/1.7.0/json) | 1.7.0 | License :: OSI Approved :: MIT License |
 | [pygments](https://pypi.org/pypi/pygments/2.21.0/json) | 2.21.0 | BSD-2-Clause |
@@ -57,5 +58,7 @@ This is a metadata inventory for the resolved Windows Python 3.11 dependencies a
 | [Microsoft.WindowsAppSDK.Widgets](https://www.nuget.org/packages/Microsoft.WindowsAppSDK.Widgets/2.6.4) | 2.6.4 | license.txt |
 | [Microsoft.WindowsAppSDK.WinUI](https://www.nuget.org/packages/Microsoft.WindowsAppSDK.WinUI/2.6.4) | 2.6.4 | license.txt |
 | [System.Numerics.Tensors](https://www.nuget.org/packages/System.Numerics.Tensors/9.0.0) | 9.0.0 | MIT |
+
+HEIC decoding uses `pi-heif` rather than `pillow-heif`: the app never encodes HEIC, and `pillow-heif` wheels declare GPLv2 because they bundle x265. LGPLv3 obligations for the bundled native libraries (notice, source offer, replaceable DLLs) still need the redistribution review below.
 
 Release gates: archive exact upstream license texts and applicable notices with the installer; include CPython/PSF and .NET/runtime redistribution terms; verify all selected native/runtime components and model processing assets; generate a distributable SBOM and sign/review the final artifacts. Real AI execution and package compatibility remain unverified.

@@ -76,6 +76,7 @@ public sealed class PythonEngineBridge : IDisposable
         try
         {
             var timeout = action is "scan" or "install_model" or "backup_local" or "backup_s3" or "duplicates"
+                or "device_import_commit"
                 ? TimeSpan.FromHours(12) : TimeSpan.FromMinutes(action == "search" ? 5 : 1);
             return await source.Task.WaitAsync(timeout, cancellationToken);
         }
@@ -122,6 +123,7 @@ public sealed class PythonEngineBridge : IDisposable
         finally
         {
             var error = new IOException("Local photo engine stopped. " + _lastError);
+            if (!_disposed) AppLog.Error("Local photo engine stopped", _lastError);
             foreach (var item in _pending)
                 if (_pending.TryRemove(item.Key, out var source)) source.TrySetException(error);
         }
@@ -136,6 +138,8 @@ public sealed class PythonEngineBridge : IDisposable
                 var line = await proc.StandardError.ReadLineAsync();
                 if (line is null) break;
                 _lastError = line.Length > 500 ? line[..500] : line;
+                // Includes what the engine's own log cannot: a failure before it starts up.
+                AppLog.Write("engine: " + line);
             }
         }
         catch (Exception) { }
